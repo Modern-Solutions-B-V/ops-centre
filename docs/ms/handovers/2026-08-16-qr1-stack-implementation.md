@@ -18,7 +18,7 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 - QR1 acceptance helper: `ods/scripts/ms-qr1-acceptance.sh`.
 - QR1 helper regression tests: `ods/tests/test-ms-qr1-helpers.sh`.
 - Operator runbook: `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`.
-- Changelog entries: `MSODS-0004`, `MSODS-0005`, `MSODS-0006`, `MSODS-0007`, `MSODS-0008`.
+- Changelog entries: `MSODS-0004`, `MSODS-0005`, `MSODS-0006`, `MSODS-0007`, `MSODS-0008`, `MSODS-0009`.
 
 ## Boundaries
 
@@ -32,6 +32,7 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 - Qdrant and SearXNG require non-empty generated secrets.
 - Host-agent nmcli routes have no supported disable switch in upstream config; QR1 documents and tests unauthenticated denial instead of editing core host-agent code.
 - LiteLLM scoped virtual consumer keys are deferred to QR2. QR1 shares the LiteLLM master key with Open WebUI and Hermes because there is no clean CONFIGURE-only virtual-key provisioning path in this ODS profile without adding deployment complexity or touching core code.
+- Clean Ubuntu 24.04 deploy hosts must have `python3-yaml` and `jq` before QR1 validation; `jq` is required by `scripts/validate-env.sh`.
 
 ## Validation To Repeat On Deploy Host
 

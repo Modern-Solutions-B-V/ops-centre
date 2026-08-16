@@ -346,6 +346,9 @@ assert_contains 'docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build
 assert_contains 'docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --force-recreate' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_not_contains 'docker network create ods-network' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'sudo systemctl restart ods-host-agent.service' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'sudo apt-get install -y python3-yaml jq' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'jq --version' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'jq is required for schema validation' scripts/validate-env.sh
 
 COMPOSE_JSON="$(cat "$tmpdir/compose-config.json")" python3 - <<'PY'
 import json

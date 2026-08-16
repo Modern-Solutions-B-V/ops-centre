@@ -42,6 +42,7 @@ Install Docker Engine only if absent.
 docker version
 python3 --version
 python3 -c 'import yaml; print("python3-yaml available")'
+jq --version
 ```
 
 If missing, follow Docker's official Ubuntu/Debian Engine install procedure for the EVO-X3 OS release, then run:
@@ -53,17 +54,18 @@ docker network ls
 sudo ufw status numbered
 ```
 
-On a clean Ubuntu 24.04 host, install the Python YAML package before QR1 gates:
+On a clean Ubuntu 24.04 host, install the Python YAML package and `jq` before QR1 gates:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3-yaml
+sudo apt-get install -y python3-yaml jq
 python3 -c 'import yaml; print("python3-yaml available")'
+jq --version
 ```
 
-Expected: Docker client/server both report versions; `python3` exists; `import yaml` succeeds; UFW policy is unchanged except Docker's own chains.
+Expected: Docker client/server both report versions; `python3` exists; `import yaml` succeeds; `jq --version` reports the installed jq version; UFW policy is unchanged except Docker's own chains.
 
-Evidence: package install transcript, `docker version`, `python3 --version`, Python YAML import output, `docker network ls`, and `ufw status numbered`.
+Evidence: package install transcript, `docker version`, `python3 --version`, Python YAML import output, `jq --version`, `docker network ls`, and `ufw status numbered`.
 
 Rollback:
 

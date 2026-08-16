@@ -8,6 +8,64 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-16 — Document QR1 jq validation prerequisite
+
+### Change ID
+`MSODS-0009`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`feature/qr1-stack` / PR #6
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`CONFIGURE` + `EXTEND`
+
+### Files changed
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+- `ods/tests/test-ms-qr1-helpers.sh`
+
+### Reason
+Resolve the remaining Codex-bot finding that QR1 deploy documentation added
+`validate-env.sh` as a gate without documenting its `jq` host dependency.
+
+### Behavior before
+The QR1 runbook installed and verified `python3-yaml` on clean Ubuntu 24.04
+hosts, but did not install or verify `jq`. `scripts/validate-env.sh` requires
+`jq` and exits before schema validation if it is absent.
+
+### Behavior after
+The QR1 runbook installs `jq` alongside `python3-yaml`, verifies it with
+`jq --version`, and records `jq` in expected evidence. The QR1 helper
+regression suite asserts that the documented prerequisite set covers the
+`validate-env.sh` dependency.
+
+### Security / privacy impact
+Positive. The QR1 gate is now reproducible on clean deploy hosts without
+weakening validation or exposing secrets.
+
+### Upgrade / upstream impact
+Low. Documentation and QR1 regression coverage only.
+
+### Validation performed
+- `bash tests/test-ms-qr1-helpers.sh`
+- `bash scripts/validate-env.sh profiles/ms-qr1.env.example`
+- `docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config`
+- `git diff --check`
+- changed-file secret scan
+
+### Rollback
+Repository rollback: revert the MSODS-0009 correction commit. Host rollback:
+none required; `jq` is a read-only validation prerequisite.
+
+---
+
 ## 2026-08-16 — Close QR1 Codex final-review gaps
 
 ### Change ID
