@@ -73,7 +73,11 @@ touch "$state"
 if [[ "${1:-}" == "status" ]]; then
   line_no=1
   while IFS= read -r line; do
-    printf '[%2d] %s\n' "$line_no" "$line"
+    if [[ "$line" =~ ^from[[:space:]]+([^[:space:]]+)[[:space:]]+to[[:space:]]+([^[:space:]]+)[[:space:]]+port[[:space:]]+([^[:space:]]+).*comment[[:space:]]+(.*)$ ]]; then
+      printf '[%2d] %s %s/tcp ALLOW IN %s # %s\n' "$line_no" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]}"
+    else
+      printf '[%2d] %s\n' "$line_no" "$line"
+    fi
     line_no=$((line_no + 1))
   done < "$state"
   exit 0
@@ -186,12 +190,32 @@ assert_contains "172.31.0.0/16 -> 172.31.0.1:11434/tcp" "$tmpdir/ufw-plan.out"
 assert_contains "172.20.0.0/16 -> 172.20.0.1:7710/tcp" "$tmpdir/ufw-plan.out"
 assert_not_contains "172.29.0.0/16" "$tmpdir/ufw-plan.out"
 
+"${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh expected-rules > "$tmpdir/ufw-expected.out"
+assert_contains "172.31.0.0/16|172.31.0.1|11434" "$tmpdir/ufw-expected.out"
+assert_contains "172.31.0.0/16|172.31.0.1|7710" "$tmpdir/ufw-expected.out"
+assert_contains "172.20.0.0/16|172.20.0.1|11434" "$tmpdir/ufw-expected.out"
+assert_contains "172.20.0.0/16|172.20.0.1|7710" "$tmpdir/ufw-expected.out"
+
 "${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh apply > "$tmpdir/ufw-apply.out"
 [[ "$(wc -l < "$tmpdir/ufw-state.txt" | tr -d ' ')" == "4" ]] || {
   echo "expected four QR1 UFW rules after apply" >&2
   cat "$tmpdir/ufw-state.txt" >&2
   exit 1
 }
+"${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_ufw_rules' > "$tmpdir/ufw-acceptance.out"
+cp "$tmpdir/ufw-state.txt" "$tmpdir/ufw-state.complete"
+awk 'index($0, "port 7710") == 0 {print}' "$tmpdir/ufw-state.complete" > "$tmpdir/ufw-state.txt"
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_ufw_rules' > "$tmpdir/ufw-missing.out" 2> "$tmpdir/ufw-missing.err"; then
+  echo "UFW acceptance should fail when a required QR1 rule is missing" >&2
+  exit 1
+fi
+cp "$tmpdir/ufw-state.complete" "$tmpdir/ufw-state.txt"
+printf '%s\n' 'from 172.99.0.0/16 to 172.99.0.1 port 11434 proto tcp comment MS QR1 docker-to-host 11434' >> "$tmpdir/ufw-state.txt"
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_ufw_rules' > "$tmpdir/ufw-stale.out" 2> "$tmpdir/ufw-stale.err"; then
+  echo "UFW acceptance should fail when a stale QR1 rule is present" >&2
+  exit 1
+fi
+cp "$tmpdir/ufw-state.complete" "$tmpdir/ufw-state.txt"
 "${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh remove > "$tmpdir/ufw-remove.out"
 [[ ! -s "$tmpdir/ufw-state.txt" ]] || {
   echo "expected zero QR1 UFW rules after remove" >&2
@@ -250,6 +274,37 @@ assert_not_contains '172.29.0.1' "$tmpdir/bridge.unit"
 
 "${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh plan > "$tmpdir/bridge.plan"
 assert_contains 'MS_QR1_HOST_GATEWAY=172.31.0.1' "$tmpdir/bridge.plan"
+assert_contains 'systemctl daemon-reload' scripts/ms-qr1-ollama-bridge.sh
+assert_contains 'systemctl restart "$SERVICE_NAME"' scripts/ms-qr1-ollama-bridge.sh
+python3 - <<'PY'
+from pathlib import Path
+text = Path("scripts/ms-qr1-ollama-bridge.sh").read_text()
+install = text.index('run_privileged install -m 0644 "$unit_tmp" "$UNIT_PATH"')
+reload = text.index('run_privileged systemctl daemon-reload', install)
+restart = text.index('run_privileged systemctl restart "$SERVICE_NAME"', reload)
+if not install < reload < restart:
+    raise SystemExit("Ollama bridge install path must reload and restart after unit replacement")
+PY
+
+cat > "$tmpdir/curl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${CURL_MODE:-401}" in
+  401) printf '401' ;;
+  403) printf '403' ;;
+  404) printf '404' ;;
+  transport) exit 7 ;;
+  *) printf '%s' "$CURL_MODE" ;;
+esac
+SH
+chmod +x "$tmpdir/curl"
+CURL_MODE=401 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; expect_http_status http://example.invalid 401 403'
+CURL_MODE=403 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; expect_http_status http://example.invalid 401 403'
+CURL_MODE=404 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; expect_http_status http://example.invalid 401 403 404'
+if CURL_MODE=transport "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; expect_http_status http://example.invalid 401 403' > "$tmpdir/http-transport.out" 2> "$tmpdir/http-transport.err"; then
+  echo "HTTP status helper should fail on transport errors" >&2
+  exit 1
+fi
 
 for f in \
   scripts/ms-qr1-compose-flags.sh \
@@ -317,6 +372,28 @@ config_model="$(sed -n 's/.*model:[[:space:]]*openai\///p' config/litellm/ms-qr1
   echo "profile EXTERNAL_LLM_MODEL does not match LiteLLM local model" >&2
   exit 1
 }
+
+qr1_env="$tmpdir/ms-qr1.env"
+cp profiles/ms-qr1.env.example "$qr1_env"
+python3 - "$qr1_env" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+replacements = {
+    "GENERATE_ME_DOCKER_GATEWAY": "172.31.0.1",
+    "GENERATE_ME_HEX_16": "1111111111111111",
+    "GENERATE_ME_HEX_32": "11111111111111111111111111111111",
+    "GENERATE_ME_HEX_64": "1111111111111111111111111111111111111111111111111111111111111111",
+    "GENERATE_ME_BASE64URL_32": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "GENERATE_ME_LANGFUSE_INIT_ORG_ID": "qr1-org",
+    "GENERATE_ME_LANGFUSE_INIT_PROJECT_ID": "qr1-project",
+}
+text = path.read_text()
+for old, new in replacements.items():
+    text = text.replace(old, new)
+path.write_text(text)
+PY
+bash scripts/validate-env.sh "$qr1_env" > "$tmpdir/validate-env.out"
 
 OLLAMA_TAGS_JSON='{"models":[{"name":"qwen3.8:27b"}]}' python3 - qwen3.8:27b <<'PY'
 import os

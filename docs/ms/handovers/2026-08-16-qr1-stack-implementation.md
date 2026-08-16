@@ -18,7 +18,7 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 - QR1 acceptance helper: `ods/scripts/ms-qr1-acceptance.sh`.
 - QR1 helper regression tests: `ods/tests/test-ms-qr1-helpers.sh`.
 - Operator runbook: `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`.
-- Changelog entries: `MSODS-0004`, `MSODS-0005`, `MSODS-0006`.
+- Changelog entries: `MSODS-0004`, `MSODS-0005`, `MSODS-0006`, `MSODS-0007`, `MSODS-0008`.
 
 ## Boundaries
 
@@ -39,6 +39,7 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 cd ods
 docker compose $(scripts/ms-qr1-compose-flags.sh) config
 sudo EXPECTED_MODEL=<qr1-ollama-model> ENV_FILE="$PWD/.env" scripts/ms-qr1-acceptance.sh
+bash scripts/validate-env.sh .env
 python3 scripts/audit-extensions.py
 bash tests/test-safe-env.sh
 bash tests/test-secret-security.sh

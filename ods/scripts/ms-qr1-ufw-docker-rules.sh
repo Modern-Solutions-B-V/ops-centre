@@ -5,6 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   scripts/ms-qr1-ufw-docker-rules.sh plan
+  scripts/ms-qr1-ufw-docker-rules.sh expected-rules
   scripts/ms-qr1-ufw-docker-rules.sh apply
   scripts/ms-qr1-ufw-docker-rules.sh remove
 
@@ -16,7 +17,7 @@ USAGE
 
 ACTION="${1:-plan}"
 case "$ACTION" in
-  plan|apply|remove) ;;
+  plan|expected-rules|apply|remove) ;;
   *) usage >&2; exit 2 ;;
 esac
 
@@ -155,6 +156,11 @@ fi
 unique_rules=()
 if [[ "${#rules[@]}" -gt 0 ]]; then
   mapfile -t unique_rules < <(printf '%s\n' "${rules[@]}" | sort -u)
+fi
+
+if [[ "$ACTION" == "expected-rules" ]]; then
+  printf '%s\n' "${unique_rules[@]}"
+  exit 0
 fi
 
 echo "MS QR1 UFW rule set:"

@@ -8,6 +8,101 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-16 — Close QR1 Codex final-review gaps
+
+### Change ID
+`MSODS-0008`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`feature/qr1-stack` / PR #6
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`CONFIGURE` + `EXTEND`
+
+### Files changed
+- `ods/.env.schema.json`
+- `ods/scripts/ms-qr1-acceptance.sh`
+- `ods/scripts/ms-qr1-ufw-docker-rules.sh`
+- `ods/scripts/ms-qr1-ollama-bridge.sh`
+- `ods/tests/test-ms-qr1-helpers.sh`
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Resolve GitHub Codex review findings against commit `1f9758be` before final
+QR1 review.
+
+### MS requirement / ADR
+QR1 acceptance must distinguish HTTP authorization denials from transport
+failures, restart the Ollama bridge after unit replacement, validate the
+complete UFW Docker-to-host rule set, and keep the QR1 profile aligned with
+the canonical environment schema.
+
+### Behavior before
+QR1 acceptance used `curl -f` for negative authorization checks, so expected
+`401`, `403`, and `404` responses were reported as curl failures. The Ollama
+bridge install path reloaded systemd and enabled the unit, but did not restart
+an already-running service after a regenerated unit. UFW acceptance only
+checked that at least one QR1-commented rule existed. The QR1 profile
+contained legitimate QR1 keys that were absent from `.env.schema.json`, so
+`validate-env.sh profiles/ms-qr1.env.example` rejected the profile.
+
+### Behavior after
+Authorization-boundary checks read and assert HTTP status codes without
+`curl -f` while still failing on transport errors. The bridge helper restarts
+`ms-qr1-ollama-bridge.service` after installing the rendered unit and running
+`daemon-reload`. UFW acceptance compares the full expected rule set from the
+QR1 UFW helper with `ufw status numbered`, including source CIDR, destination
+gateway, and both ports `11434` and `7710`, and fails on missing, stale, or
+unparseable QR1 rules. The QR1-specific environment variables consumed by the
+profile and compose/runtime configuration are now represented in
+`.env.schema.json`, and QR1 helper tests validate a safely filled throwaway
+profile.
+
+### Security / privacy impact
+Positive. The QR1 deploy gate now catches incomplete firewall state and
+schema drift, while authorization-negative checks no longer conflate expected
+HTTP denial with network failure. No secrets are added and no network exposure
+is widened.
+
+### Upgrade / upstream impact
+Low. The environment schema extension is additive. Runtime changes remain
+scoped to QR1 helper scripts, tests, and deployment documentation.
+
+### Validation performed
+- `make lint`
+- `make test` ran through the QR1 helper suite and later failed in
+  `bootstrap-upgrade compose-flags recovery` because this macOS validation
+  host does not provide `flock`; the failure is outside QR1 and was not
+  introduced by this change.
+- `bash tests/test-ms-qr1-helpers.sh`
+- individual `bash -n` on every QR1 shell script
+- full QR1 Compose render
+- `bash scripts/validate-env.sh` against a safely filled QR1 env
+- `python3 scripts/audit-extensions.py`
+- `bash tests/test-safe-env.sh`
+- `bash tests/test-secret-security.sh`
+- `python3 tests/contracts/test-network-exposure-contracts.py`
+- `git diff --check`
+- changed-file secret scan
+
+### Rollback
+Repository rollback: revert the MSODS-0008 correction commit.
+
+Host rollback if already deployed: run `sudo scripts/ms-qr1-ufw-docker-rules.sh
+remove` before Compose teardown, then remove Tailscale serve mappings, stop
+and disable `ms-qr1-ollama-bridge.service`, remove the host-agent unit if
+installed for QR1, and shred the filled `.env` per the latest runbook.
+
+---
+
 ## 2026-08-16 — Close QR1 final re-review gaps
 
 ### Change ID

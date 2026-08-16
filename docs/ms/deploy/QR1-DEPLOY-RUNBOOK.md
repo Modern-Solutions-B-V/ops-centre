@@ -128,6 +128,18 @@ Rules:
 - QR1 shares the LiteLLM master key with Open WebUI and Hermes because this ODS/LiteLLM profile has no clean CONFIGURE-only scoped virtual-key provisioning path. This is a QR1 limitation and is tracked for QR2.
 - Mirror generated secrets to Bitwarden; never paste real values into docs, commits, issue comments, or screenshots.
 
+Validate the filled profile before continuing:
+
+```bash
+bash scripts/validate-env.sh .env
+```
+
+Expected: the QR1 `.env` validates against `.env.schema.json` with no unknown keys.
+
+Evidence: validation output.
+
+Rollback: remove `.env` and regenerate from `profiles/ms-qr1.env.example`.
+
 Validate before Docker gateway discovery:
 
 ```bash
@@ -413,6 +425,7 @@ Blocking QR1 gate:
 
 ```bash
 sudo EXPECTED_MODEL=qwen3.8:27b ENV_FILE="$PWD/.env" scripts/ms-qr1-acceptance.sh
+bash scripts/validate-env.sh .env
 python3 scripts/audit-extensions.py
 bash tests/test-safe-env.sh
 bash tests/test-secret-security.sh

@@ -35,6 +35,27 @@ compose_json() {
   docker compose $(scripts/ms-qr1-compose-flags.sh) config --format json
 }
 
+http_status() {
+  local url="$1"
+  curl -sS -o /dev/null -w '%{http_code}' "$url"
+}
+
+expect_http_status() {
+  local url="$1"
+  shift
+  local status
+  if ! status="$(http_status "$url")"; then
+    echo "transport failure for $url" >&2
+    return 1
+  fi
+  local expected
+  for expected in "$@"; do
+    [[ "$status" == "$expected" ]] && return 0
+  done
+  echo "unexpected HTTP status for $url: $status; expected one of: $*" >&2
+  return 1
+}
+
 check_no_fallbacks() {
   ! grep -RIn -- 'fallbacks:' config/litellm/ms-qr1.yaml
 }
@@ -170,15 +191,11 @@ check_hermes_tui() {
     echo "host port 9119 is bound" >&2
     return 1
   fi
-  local status
-  status="$(curl -fsS -o /dev/null -w '%{http_code}' "$HERMES_URL/api/pty")" || status="curl-failed"
-  [[ "$status" == "401" || "$status" == "403" || "$status" == "404" ]]
+  expect_http_status "$HERMES_URL/api/pty" 401 403 404
 }
 
 check_qdrant_auth() {
-  local status
-  status="$(curl -fsS -o /dev/null -w '%{http_code}' "$QDRANT_URL/collections")" || status="curl-failed"
-  [[ "$status" == "401" || "$status" == "403" ]]
+  expect_http_status "$QDRANT_URL/collections" 401 403
 }
 
 check_no_placeholders() {
@@ -278,35 +295,76 @@ discover_host_agent_url() {
 }
 
 check_host_agent_nmcli_boundary() {
-  local url status
+  local url
   url="$(discover_host_agent_url)"
-  status="$(curl -fsS -o /dev/null -w '%{http_code}' "$url/v1/network/wifi-scan")" || status="curl-failed"
-  [[ "$status" == "401" || "$status" == "403" ]]
+  expect_http_status "$url/v1/network/wifi-scan" 401 403
 }
 
 check_ufw_rules() {
   require ufw
-  ufw status numbered | grep -F "MS QR1 docker-to-host" >/dev/null
+  local expected status
+  expected="$(scripts/ms-qr1-ufw-docker-rules.sh expected-rules)"
+  status="$(ufw status numbered)"
+  EXPECTED_RULES="$expected" UFW_STATUS="$status" python3 - <<'PY'
+import os
+import re
+import sys
+
+expected = set()
+for line in os.environ["EXPECTED_RULES"].splitlines():
+    if not line.strip():
+        continue
+    subnet, gateway, port = line.split("|")
+    expected.add((subnet, gateway, port))
+
+actual = set()
+stale = []
+for line in os.environ["UFW_STATUS"].splitlines():
+    if "MS QR1 docker-to-host" not in line:
+        continue
+    from_match = re.search(r"\bfrom\s+([0-9./]+)\b", line)
+    to_match = re.search(r"\bto\s+([0-9.]+)\b", line)
+    command_style = re.search(r"\bport\s+(11434|7710)\b", line)
+    status_style = re.search(r"\]\s+([0-9.]+)\s+(11434|7710)(?:/tcp)?\s+ALLOW\s+IN\s+([0-9./]+)\b", line)
+    if from_match and to_match and command_style:
+        actual.add((from_match.group(1), to_match.group(1), command_style.group(1)))
+    elif status_style:
+        actual.add((status_style.group(3), status_style.group(1), status_style.group(2)))
+    else:
+        stale.append(line)
+
+missing = sorted(expected - actual)
+unexpected = sorted(actual - expected)
+if missing or unexpected or stale:
+    print(f"missing={missing} unexpected={unexpected} unparsable_stale={stale}", file=sys.stderr)
+    sys.exit(1)
+PY
 }
 
-check "LiteLLM QR1 config has no fallbacks" check_no_fallbacks
-check "LiteLLM QR1 has exactly one external model" check_one_external_model
-check "LiteLLM local model matches EXTERNAL_LLM_MODEL" check_local_model_matches_env
-check "rendered QR1 service allow-list and exclusions" check_rendered_services_policy
-check "rendered QR1 published ports are loopback" check_rendered_published_ports_loopback
-check "ms-qr1-host env references have host aliases" check_ms_qr1_host_aliases
-check "live QR1 service listeners are loopback and bridge listeners are not wildcard" check_live_listeners_loopback_and_bridge_no_wildcard
-check "Hermes TUI/9119 disabled" check_hermes_tui
-check "Qdrant rejects unauthenticated requests" check_qdrant_auth
-check "rendered env/config contains no placeholders" check_no_placeholders
-check "Ollama model identity matches EXPECTED_MODEL" check_model_identity
-check "containers reach host Ollama through ms-qr1-host" check_container_ollama_route
-check "Host-agent nmcli endpoints reject unauthenticated requests" check_host_agent_nmcli_boundary
-check "UFW contains QR1 Docker-to-host rules" check_ufw_rules
+main() {
+  check "LiteLLM QR1 config has no fallbacks" check_no_fallbacks
+  check "LiteLLM QR1 has exactly one external model" check_one_external_model
+  check "LiteLLM local model matches EXTERNAL_LLM_MODEL" check_local_model_matches_env
+  check "rendered QR1 service allow-list and exclusions" check_rendered_services_policy
+  check "rendered QR1 published ports are loopback" check_rendered_published_ports_loopback
+  check "ms-qr1-host env references have host aliases" check_ms_qr1_host_aliases
+  check "live QR1 service listeners are loopback and bridge listeners are not wildcard" check_live_listeners_loopback_and_bridge_no_wildcard
+  check "Hermes TUI/9119 disabled" check_hermes_tui
+  check "Qdrant rejects unauthenticated requests" check_qdrant_auth
+  check "rendered env/config contains no placeholders" check_no_placeholders
+  check "Ollama model identity matches EXPECTED_MODEL" check_model_identity
+  check "containers reach host Ollama through ms-qr1-host" check_container_ollama_route
+  check "Host-agent nmcli endpoints reject unauthenticated requests" check_host_agent_nmcli_boundary
+  check "UFW contains complete QR1 Docker-to-host rule set" check_ufw_rules
 
-if [[ "$failures" -gt 0 ]]; then
-  echo "$failures QR1 acceptance check(s) failed" >&2
-  exit 1
+  if [[ "$failures" -gt 0 ]]; then
+    echo "$failures QR1 acceptance check(s) failed" >&2
+    exit 1
+  fi
+
+  echo "All QR1 acceptance checks passed"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-echo "All QR1 acceptance checks passed"

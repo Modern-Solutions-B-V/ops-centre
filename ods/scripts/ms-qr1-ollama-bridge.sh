@@ -197,5 +197,6 @@ render_unit > "$unit_tmp"
 run_privileged install -m 0644 "$unit_tmp" "$UNIT_PATH"
 rm -f "$unit_tmp"
 run_privileged systemctl daemon-reload
-run_privileged systemctl enable --now "$SERVICE_NAME"
+run_privileged systemctl enable "$SERVICE_NAME"
+run_privileged systemctl restart "$SERVICE_NAME"
 systemctl status "$SERVICE_NAME" --no-pager
