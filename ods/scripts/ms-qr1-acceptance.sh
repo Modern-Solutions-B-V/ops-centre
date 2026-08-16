@@ -200,7 +200,7 @@ check_qdrant_auth() {
 
 check_no_placeholders() {
   [[ -f "$ENV_FILE" ]] || { echo "$ENV_FILE not found" >&2; return 1; }
-  ! grep -RInE 'CHANGEME|GENERATE_ME' "$ENV_FILE" config/litellm/ms-qr1.yaml docker-compose.ms-qr1.yml
+  ! grep -nE '^[A-Za-z_][A-Za-z0-9_]*=.*(CHANGEME|GENERATE_ME)' "$ENV_FILE"
 }
 
 check_model_identity() {

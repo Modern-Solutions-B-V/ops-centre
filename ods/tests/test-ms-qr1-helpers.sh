@@ -349,6 +349,7 @@ assert_contains 'sudo systemctl restart ods-host-agent.service' ../docs/ms/deplo
 assert_contains 'sudo apt-get install -y python3-yaml jq' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'jq --version' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'jq is required for schema validation' scripts/validate-env.sh
+assert_contains "^[A-Za-z_][A-Za-z0-9_]*=.*(CHANGEME|GENERATE_ME)" ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 
 COMPOSE_JSON="$(cat "$tmpdir/compose-config.json")" python3 - <<'PY'
 import json
@@ -378,25 +379,77 @@ config_model="$(sed -n 's/.*model:[[:space:]]*openai\///p' config/litellm/ms-qr1
 
 qr1_env="$tmpdir/ms-qr1.env"
 cp profiles/ms-qr1.env.example "$qr1_env"
-python3 - "$qr1_env" <<'PY'
+python3 - profiles/ms-qr1.env.example "$qr1_env" "$tmpdir/restored-placeholder.env" <<'PY'
 from pathlib import Path
+import re
 import sys
-path = Path(sys.argv[1])
-replacements = {
-    "GENERATE_ME_DOCKER_GATEWAY": "172.31.0.1",
-    "GENERATE_ME_HEX_16": "1111111111111111",
-    "GENERATE_ME_HEX_32": "11111111111111111111111111111111",
-    "GENERATE_ME_HEX_64": "1111111111111111111111111111111111111111111111111111111111111111",
-    "GENERATE_ME_BASE64URL_32": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-    "GENERATE_ME_LANGFUSE_INIT_ORG_ID": "qr1-org",
-    "GENERATE_ME_LANGFUSE_INIT_PROJECT_ID": "qr1-project",
-}
-text = path.read_text()
-for old, new in replacements.items():
-    text = text.replace(old, new)
-path.write_text(text)
+profile_path = Path(sys.argv[1])
+filled_path = Path(sys.argv[2])
+restored_path = Path(sys.argv[3])
+token_re = re.compile(r"(?:CHANGEME|GENERATE_ME)[A-Za-z0-9_]*")
+assign_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+
+def fill_value(token: str) -> str:
+    if token == "GENERATE_ME_DOCKER_GATEWAY":
+        return "172.31.0.1"
+    if token == "GENERATE_ME_HEX_32_DISTINCT_FROM_DASHBOARD_API_KEY":
+        return "22222222222222222222222222222222"
+    if token == "GENERATE_ME_SK_ODS_HEX_32":
+        return "qr1-litellm-dummy-key"
+    if token == "GENERATE_ME_FROM_BITWARDEN":
+        return "from-bitwarden-dummy"
+    if token == "GENERATE_ME_UNUSED_QR1":
+        return "unused-qr1-dummy"
+    if token.startswith("GENERATE_ME_HEX_"):
+        return "1" * int(token.rsplit("_", 1)[1])
+    if token.startswith("GENERATE_ME_BASE64_"):
+        return "A" * int(token.rsplit("_", 1)[1])
+    if token == "GENERATE_ME_BASE64URL_32":
+        return "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    if token == "GENERATE_ME_LANGFUSE_INIT_ORG_ID":
+        return "qr1-org"
+    if token == "GENERATE_ME_LANGFUSE_INIT_PROJECT_ID":
+        return "qr1-project"
+    raise SystemExit(f"unknown QR1 placeholder token in assignment value: {token}")
+
+lines = profile_path.read_text().splitlines()
+tokens = []
+for line in lines:
+    if assign_re.match(line):
+        tokens.extend(token_re.findall(line.split("=", 1)[1]))
+if not tokens:
+    raise SystemExit("expected QR1 profile to contain assignment-value placeholders")
+
+filled_lines = []
+restored = False
+for line in lines:
+    if assign_re.match(line):
+        key, value = line.split("=", 1)
+        for token in token_re.findall(value):
+            value = value.replace(token, fill_value(token))
+        if not restored and token_re.search(line.split("=", 1)[1]):
+            restored_value = value.replace(fill_value(token_re.search(line.split("=", 1)[1]).group(0)), token_re.search(line.split("=", 1)[1]).group(0), 1)
+            restored_line = f"{key}={restored_value}"
+            restored = True
+        filled_lines.append(f"{key}={value}")
+    else:
+        filled_lines.append(line)
+if not restored:
+    raise SystemExit("failed to prepare restored-placeholder QR1 fixture")
+filled_path.write_text("\n".join(filled_lines) + "\n")
+restored_lines = list(filled_lines)
+for index, line in enumerate(lines):
+    if assign_re.match(line) and token_re.search(line.split("=", 1)[1]):
+        restored_lines[index] = restored_line
+        break
+restored_path.write_text("\n".join(restored_lines) + "\n")
 PY
 bash scripts/validate-env.sh "$qr1_env" > "$tmpdir/validate-env.out"
+ENV_FILE="$qr1_env" bash -c 'source scripts/ms-qr1-acceptance.sh; check_no_placeholders'
+if ENV_FILE="$tmpdir/restored-placeholder.env" bash -c 'source scripts/ms-qr1-acceptance.sh; check_no_placeholders' > "$tmpdir/restored-placeholder.out" 2> "$tmpdir/restored-placeholder.err"; then
+  echo "check_no_placeholders should fail when one assignment-value placeholder remains" >&2
+  exit 1
+fi
 
 OLLAMA_TAGS_JSON='{"models":[{"name":"qwen3.8:27b"}]}' python3 - qwen3.8:27b <<'PY'
 import os

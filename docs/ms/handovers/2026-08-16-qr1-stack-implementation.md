@@ -18,7 +18,7 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 - QR1 acceptance helper: `ods/scripts/ms-qr1-acceptance.sh`.
 - QR1 helper regression tests: `ods/tests/test-ms-qr1-helpers.sh`.
 - Operator runbook: `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`.
-- Changelog entries: `MSODS-0004`, `MSODS-0005`, `MSODS-0006`, `MSODS-0007`, `MSODS-0008`, `MSODS-0009`.
+- Changelog entries: `MSODS-0004`, `MSODS-0005`, `MSODS-0006`, `MSODS-0007`, `MSODS-0008`, `MSODS-0009`, `MSODS-0010`.
 
 ## Boundaries
 

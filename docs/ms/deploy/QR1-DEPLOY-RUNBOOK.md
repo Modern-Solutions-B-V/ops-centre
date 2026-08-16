@@ -145,7 +145,7 @@ Rollback: remove `.env` and regenerate from `profiles/ms-qr1.env.example`.
 Validate before Docker gateway discovery:
 
 ```bash
-grep -nE 'CHANGEME|GENERATE_ME' .env | grep -v '^.*MS_QR1_HOST_GATEWAY=GENERATE_ME_DOCKER_GATEWAY$'
+grep -nE '^[A-Za-z_][A-Za-z0-9_]*=.*(CHANGEME|GENERATE_ME)' .env | grep -Ev '^[0-9]+:MS_QR1_HOST_GATEWAY=GENERATE_ME_DOCKER_GATEWAY$'
 grep -nE '^(BIND_ADDRESS|HERMES_DASHBOARD_TUI|ODS_AGENT_HOST|QDRANT_API_KEY|SEARXNG_SECRET|ANTHROPIC_API_KEY)=' .env
 ```
 

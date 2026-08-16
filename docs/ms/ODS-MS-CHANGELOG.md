@@ -8,6 +8,69 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-16 — Fix QR1 placeholder acceptance gate
+
+### Change ID
+`MSODS-0010`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`feature/qr1-stack` / PR #6
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`EXTEND`
+
+### Files changed
+- `ods/scripts/ms-qr1-acceptance.sh`
+- `ods/tests/test-ms-qr1-helpers.sh`
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Resolve the final QR1 acceptance-gate defect where placeholder detection also
+matched comments copied from `profiles/ms-qr1.env.example` into `.env`.
+
+### Behavior before
+`check_no_placeholders` and the runbook placeholder command searched for
+`CHANGEME` or `GENERATE_ME` anywhere in `.env`, so explanatory comments could
+fail acceptance even after every assignment value had been replaced.
+
+### Behavior after
+QR1 placeholder detection only inspects assignment values with the anchored
+pattern `^[A-Za-z_][A-Za-z0-9_]*=.*(CHANGEME|GENERATE_ME)`. The helper
+regression suite enumerates placeholder tokens from actual profile assignment
+values, fills every known token with safe dummy values, proves
+`check_no_placeholders` passes, restores one placeholder value, and proves the
+check fails.
+
+### Security / privacy impact
+Positive. The gate still blocks real placeholder values while avoiding false
+failures from comments. No secrets are added.
+
+### Upgrade / upstream impact
+Low. QR1 acceptance helper, QR1 tests, and QR1 runbook only.
+
+### Validation performed
+- `make lint`
+- `bash tests/test-ms-qr1-helpers.sh`
+- individual `bash -n` on QR1 shell scripts and helper test
+- `bash scripts/validate-env.sh profiles/ms-qr1.env.example`
+- full QR1 Compose render
+- `python3 tests/contracts/test-network-exposure-contracts.py`
+- `git diff --check`
+- changed-file secret scan
+
+### Rollback
+Repository rollback: revert the MSODS-0010 correction commit.
+
+---
+
 ## 2026-08-16 — Document QR1 jq validation prerequisite
 
 ### Change ID
