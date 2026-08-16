@@ -10,73 +10,75 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ## Entry Template
 
-## YYYY-MM-DD — <short title>
+## YYYY-MM-DD — `<short title>`
 
 ### Change ID
-MSODS-####
+`MSODS-####`
 
 ### Agent / Author
-<name/model>
+`<name/model>`
 
 ### Branch / PR
-<branch / PR>
+`<branch / PR>`
 
 ### ODS baseline
-<tag / upstream SHA>
+`<tag / upstream SHA>`
 
 ### Classification
-CONFIGURE | EXTEND | CORE CHANGE | REJECT
+`CONFIGURE` | `EXTEND` | `CORE CHANGE` | `REJECT`
 
 ### Files changed
-- <path>
+- `<path>`
 
 ### Reason
-<why>
+`<why>`
 
 ### MS requirement / ADR
-<reference>
+`<reference>`
 
 ### Behavior before
-<before>
+`<before>`
 
 ### Behavior after
-<after>
+`<after>`
 
 ### Security / privacy impact
-<impact>
+`<impact>`
 
 ### Upgrade / upstream impact
-<impact>
+`<impact>`
 
 ### Validation performed
-<commands/tests/results>
+`<commands/tests/results>`
 
 ### Rollback
-<rollback>
+`<rollback>`
 
 ### Notes
-<notes>
+`<notes>`
+
+---
 
 ## 2026-08-16 — Establish MS Ops Centre fork governance
 
 ### Change ID
-MSODS-0001
+`MSODS-0001`
 
 ### Agent / Author
 Human
 
 ### Branch / PR
-docs/ms-foundation
+`docs/ms-foundation` / PR #1
 
 ### ODS baseline
-v2.6.0
+`v2.6.0`
 
 ### Classification
-EXTEND
+`EXTEND`
 
 ### Files changed
-- docs/ms/ODS-MS-CHANGELOG.md
-- docs/ms/decisions/ODS-ADOPTION.md
+- `docs/ms/ODS-MS-CHANGELOG.md`
+- `docs/ms/decisions/ODS-ADOPTION.md`
 
 ### Reason
 Establish the Modern Solutions governance and historical tracking layer without
@@ -101,7 +103,7 @@ Low. Additive MS documentation only.
 Verified files exist and are tracked by Git.
 
 ### Rollback
-Remove docs/ms additions.
+Remove `docs/ms/` additions.
 
 ### Notes
 All future behavioral MS changes must update this file in the same PR.
