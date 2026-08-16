@@ -8,6 +8,127 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-16 — Harden QR1 final-review deployment boundary
+
+### Change ID
+`MSODS-0006`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`feature/qr1-stack` / PR #6
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`CONFIGURE` + `EXTEND`
+
+### Files changed
+- `.github/workflows/lint-shell.yml`
+- `.github/workflows/lint-python.yml`
+- `.github/workflows/validate-compose.yml`
+- `.github/workflows/secret-scan.yml`
+- `.gitignore`
+- `ods/Makefile`
+- `ods/config/litellm/ms-qr1.yaml`
+- `ods/docker-compose.ms-qr1.yml`
+- `ods/profiles/ms-qr1.env.example`
+- `ods/scripts/ms-qr1-compose-flags.sh`
+- `ods/scripts/ms-qr1-ufw-docker-rules.sh`
+- `ods/scripts/ms-qr1-ollama-bridge.sh`
+- `ods/scripts/ms-qr1-acceptance.sh`
+- `ods/tests/test-ms-qr1-helpers.sh`
+- `docs/ms/backlog/QR2-BACKLOG.md`
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Resolve independent final-review findings against commit `0718641c` before QR1
+merge without touching EVO-X3, widening network exposure, or changing upstream
+ODS core runtime code.
+
+### MS requirement / ADR
+QR1 cross-review D-6; local-only routes must not silently fall back externally;
+Docker-to-host access must be scoped to the approved QR1 trust matrix.
+
+### Behavior before
+The QR1 acceptance helper still had parse-time and heredoc/stdin hazards. The
+Ollama bridge listened on custom-network gateway IPs, but QR1 containers still
+targeted `host.docker.internal`, which can resolve to the isolated default
+Docker bridge. The generated systemd bridge unit did not escape runtime shell
+variables for systemd and could render an empty `bind=`. UFW rollback depended
+on manual rule-number deletion. UFW and bridge discovery included the internal
+Langfuse network. The runbook tested a host-agent that it did not install,
+used a moving ComfyUI checkpoint artifact without integrity verification, and
+kept incomplete hard-coded acceptance port coverage. CI filters did not cover
+PRs targeting `ms/main`.
+
+### Behavior after
+Containers use `ms-qr1-host:<MS_QR1_HOST_GATEWAY>` to reach the actual
+non-internal ODS Docker gateway where the host-side Ollama bridge listens.
+`ms-qr1-ollama-bridge.sh` renders quoted `Environment=` and literal `$$`
+runtime variables, never wildcard listeners. UFW and bridge helpers select
+rendered non-internal network names only, validate gateway/interface data, and
+UFW has a machine-manageable `remove` action. The runbook installs the
+host-agent before testing `7710`, pins and SHA256-verifies the SDXL Lightning
+checkpoint before atomic promotion, and requires helper re-run after Docker
+network recreation. Acceptance derives rendered published service ports,
+checks the rendered service allow-list/exclusion policy, verifies the local
+model tag matches `EXTERNAL_LLM_MODEL`, parses Ollama model JSON from an
+environment variable, and probes container-to-host Ollama through
+`ms-qr1-host`. PR CI now includes `ms/main`, and `make test` runs the QR1
+helper regression suite.
+
+### Security / privacy impact
+Positive. QR1 host exposure remains limited to loopback-published services and
+approved Docker-to-host paths on non-internal Docker networks. Internal
+Langfuse containers do not receive host Ollama or host-agent access. Filled
+profile files under `ods/profiles/*.env` are ignored by Git. The LiteLLM
+master key is still shared with Open WebUI and Hermes in QR1; this limitation
+is documented and tracked in the QR2 backlog for scoped consumer keys.
+
+### Upgrade / upstream impact
+Low. Changes are MS-owned configuration, docs, helper scripts, tests and CI
+filters. The duplicate Langfuse compose copy was removed; QR1 now references
+the upstream dormant Langfuse compose template directly. No ODS core change is
+made.
+
+### Validation performed
+- `make lint`
+- `bash tests/test-ms-qr1-helpers.sh`
+- individual `bash -n` on every new QR1 shell script
+- `docker compose --env-file profiles/ms-qr1.env.example $(./scripts/ms-qr1-compose-flags.sh) config`
+- `python scripts/audit-extensions.py`
+- `bash tests/test-safe-env.sh`
+- `bash tests/test-secret-security.sh`
+- `python tests/contracts/test-network-exposure-contracts.py`
+- `git diff --check`
+- changed-file secret scan
+
+`bash tests/test-network-security.sh` remains diagnostic-only for QR1; it is
+not a blocking deploy gate because it scans broad optional compose content
+instead of the explicit QR1 rendered stack.
+
+### Rollback
+Repository rollback: revert the MSODS-0006 correction commit.
+
+Host rollback if already deployed: run the latest runbook full rollback:
+stop the compose stack, reset Tailscale serve, run
+`sudo scripts/ms-qr1-ufw-docker-rules.sh remove`, run
+`sudo scripts/ms-qr1-ollama-bridge.sh remove`, remove the host-agent systemd
+unit, and shred the filled `.env`.
+
+### Notes
+No EVO-X3 deployment actions were performed. ComfyUI checkpoint metadata was
+checked against Hugging Face for pinned revision
+`c6c10e8716de60c7ef4eed6b89a06f67e772b374` and SHA256
+`e0d996ee0013e79d9d3561f50fcafb9a17e3ff07b780358e3b66d67932c4d490`.
+
+---
+
 ## 2026-08-16 — Correct QR1 deployment review findings
 
 ### Change ID
@@ -80,7 +201,6 @@ core runtime or installer code is changed.
 
 ### Validation performed
 - `bash tests/test-ms-qr1-helpers.sh`
-- `bash -n ods/scripts/ms-qr1-compose-flags.sh ods/scripts/ms-qr1-ufw-docker-rules.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-acceptance.sh`
 - `docker compose --env-file profiles/ms-qr1.env.example $(./scripts/ms-qr1-compose-flags.sh) config`
 - `python ods/scripts/audit-extensions.py`
 - `bash tests/test-safe-env.sh`
@@ -89,6 +209,13 @@ core runtime or installer code is changed.
 - `git diff --check`
 - secret scan of changed files for real keys/tokens
 
+Correction recorded by MSODS-0006: the prior multi-file `bash -n` invocation
+was structurally inadequate because Bash syntax-checks only the first script
+argument and treats the rest as positional parameters. It therefore did not
+prove `ods/scripts/ms-qr1-acceptance.sh` parsed successfully. MSODS-0006
+replaces this with per-file syntax checks and a regression fixture that proves
+broken shell syntax fails the QR1 helper suite.
+
 `bash tests/test-network-security.sh` remains diagnostic-only for QR1; it is
 not a blocking gate until it can be scoped to the explicit QR1 compose file
 set.
@@ -96,10 +223,9 @@ set.
 ### Rollback
 Repository rollback: revert the MSODS-0005 correction commit.
 
-Host rollback if already deployed: run `sudo scripts/ms-qr1-ollama-bridge.sh
-remove`, delete every MS QR1 UFW rule in descending rule-number order, stop
-the QR1 compose stack, remove Tailscale serve mappings, and shred the filled
-`.env`.
+Host rollback if already deployed: follow the latest runbook. MSODS-0006
+replaces manual UFW rule-number deletion with `sudo
+scripts/ms-qr1-ufw-docker-rules.sh remove`.
 
 ### Notes
 The host-agent nmcli surface still has no upstream CONFIGURE switch. QR1 keeps
@@ -156,8 +282,9 @@ routes and exactly one external model (`anthropic/claude-sonnet-5`), a final
 compose override that forces `HERMES_DASHBOARD_TUI=0`, requires non-empty
 Qdrant/SearXNG secrets, routes apps to host-native Ollama, enables the shipped
 Langfuse compose template, and profile-gates OpenClaw, ODS Tailscale,
-ods-proxy and Brave Search. The ODS OpenCode host-systemd extension remains
-excluded by not installing/enabling it. MS helper scripts discover Docker
+ods-proxy, Brave Search, remote-provider egress and remote-provider SSH
+tunnel. The ODS OpenCode host-systemd extension remains excluded by not
+installing/enabling it. MS helper scripts discover Docker
 subnets for UFW rules and run QR1 acceptance checks.
 
 ### Security / privacy impact

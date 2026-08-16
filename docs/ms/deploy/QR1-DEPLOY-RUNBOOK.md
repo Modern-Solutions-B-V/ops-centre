@@ -5,7 +5,7 @@ Audience: Modi operating EVO-X3 later. Codex must not run these steps on EVO-X3.
 All commands assume the operator is on EVO-X3 and uses the fork only:
 
 ```bash
-cd ~/ops-centre/ods
+cd ~/ms-ops/ops-centre/ods
 git remote -v
 git status --short --branch
 ```
@@ -28,7 +28,7 @@ ollama list
 curl -fsS http://127.0.0.1:11434/api/tags
 ```
 
-Expected: host tailscaled is active, UFW is deny-by-default with approved tailscale0 rules only, Ollama is reachable on loopback, and no ODS Docker stack is already publishing QR1 ports.
+Expected: host tailscaled is active, UFW is deny-by-default with approved `tailscale0` rules only, Ollama is reachable on loopback, and no ODS Docker stack is already publishing QR1 ports.
 
 Evidence: save all output.
 
@@ -96,7 +96,7 @@ cp profiles/ms-qr1.env.example .env
 chmod 600 .env
 ```
 
-Generate values and replace every `GENERATE_ME` placeholder:
+Generate values and replace every `GENERATE_ME` placeholder except `MS_QR1_HOST_GATEWAY`, which is filled after Docker network discovery in section 7:
 
 ```bash
 openssl rand -hex 32
@@ -108,23 +108,26 @@ ollama list
 Rules:
 
 - `BIND_ADDRESS=127.0.0.1`.
+- `HERMES_DASHBOARD_TUI=0`.
+- `ODS_AGENT_HOST=` remains empty on native Linux so dashboard-api uses the resolved Docker gateway path instead of `host.docker.internal`.
 - `EXTERNAL_LLM_MODEL` must remain `qwen3.8:27b` unless Modi explicitly approves a different QR1 model and updates `config/litellm/ms-qr1.yaml` in the same reviewed change.
 - `DASHBOARD_API_KEY` and `ODS_AGENT_KEY` must be distinct.
 - `QDRANT_API_KEY`, `SEARXNG_SECRET`, Langfuse secrets, and Token Spy key must be non-empty.
 - `LANGFUSE_DB_PASSWORD` must use hex or URL-safe base64 because it is interpolated into a PostgreSQL URL.
 - `ANTHROPIC_API_KEY` is present only in `.env` for the LiteLLM container; no email, Jira, client-system, production, Brave, MiniMax, OpenAI, or Tailscale container keys are configured.
+- QR1 shares the LiteLLM master key with Open WebUI and Hermes because this ODS/LiteLLM profile has no clean CONFIGURE-only scoped virtual-key provisioning path. This is a QR1 limitation and is tracked for QR2.
 - Mirror generated secrets to Bitwarden; never paste real values into docs, commits, issue comments, or screenshots.
 
-Validate:
+Validate before Docker gateway discovery:
 
 ```bash
-grep -nE 'CHANGEME|GENERATE_ME' .env
-grep -nE '^(BIND_ADDRESS|HERMES_DASHBOARD_TUI|QDRANT_API_KEY|SEARXNG_SECRET|ANTHROPIC_API_KEY)=' .env
+grep -nE 'CHANGEME|GENERATE_ME' .env | grep -v '^.*MS_QR1_HOST_GATEWAY=GENERATE_ME_DOCKER_GATEWAY$'
+grep -nE '^(BIND_ADDRESS|HERMES_DASHBOARD_TUI|ODS_AGENT_HOST|QDRANT_API_KEY|SEARXNG_SECRET|ANTHROPIC_API_KEY)=' .env
 ```
 
-Expected: first command prints nothing; second command shows QR1 values without displaying screenshots publicly.
+Expected: first command prints nothing; second command shows QR1 values. Do not publish screenshots containing real values.
 
-Evidence: redacted notes confirming no placeholders and file mode `600`.
+Evidence: redacted notes confirming no placeholders except `MS_QR1_HOST_GATEWAY` before section 7 and file mode `600`.
 
 Rollback:
 
@@ -134,21 +137,26 @@ cp profiles/ms-qr1.env.example .env
 chmod 600 .env
 ```
 
-## 5. Render Stack
+## 5. Pre-Render Policy Check
+
+Use a temporary gateway only to render the QR1 policy before host mutation. Replace it with the discovered gateway in section 7 before starting services.
 
 ```bash
 cd ~/ms-ops/ops-centre/ods
 scripts/ms-qr1-compose-flags.sh
-docker compose $(scripts/ms-qr1-compose-flags.sh) config > /tmp/qr1-compose.rendered.yml
-grep -n 'ms-qr1.yaml' /tmp/qr1-compose.rendered.yml
-grep -n 'HERMES_DASHBOARD_TUI.*0' /tmp/qr1-compose.rendered.yml
-grep -nE 'openclaw|tailscale|ods-proxy|brave-search|opencode' /tmp/qr1-compose.rendered.yml || true
-grep -n 'fallbacks:' config/litellm/ms-qr1.yaml || true
+MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose $(scripts/ms-qr1-compose-flags.sh) config > /tmp/qr1-compose.preflight.yml
+grep -n 'ms-qr1.yaml' /tmp/qr1-compose.preflight.yml
+grep -n 'HERMES_DASHBOARD_TUI.*0' /tmp/qr1-compose.preflight.yml
+grep -nE 'openclaw|tailscale|ods-proxy|brave-search|opencode|remote-provider-egress|remote-provider-ssh-tunnel' /tmp/qr1-compose.preflight.yml
+if grep -n 'fallbacks:' config/litellm/ms-qr1.yaml; then
+  echo "unexpected LiteLLM fallback configuration"
+  exit 1
+fi
 ```
 
-Expected: QR1 config is mounted; Hermes TUI is `0`; `llama-server` is profile-gated as `ms-qr1-excluded`; OpenClaw, ODS Tailscale, ods-proxy, Brave Search and ODS OpenCode are absent from the QR1 compose file set; the fallback grep prints nothing.
+Expected: QR1 config is mounted; Hermes TUI is `0`; excluded services are absent or profile-gated outside active QR1; the fallback grep prints nothing and exits non-zero.
 
-Evidence: save `/tmp/qr1-compose.rendered.yml` and grep output.
+Evidence: save `/tmp/qr1-compose.preflight.yml` and grep output.
 
 Rollback: no host mutation.
 
@@ -159,21 +167,24 @@ mkdir -p data/langfuse/postgres data/langfuse/clickhouse
 bash extensions/services/langfuse/hooks/post_install.sh "$PWD" "${GPU_BACKEND:-amd}"
 
 mkdir -p data/comfyui/ComfyUI/models/checkpoints data/comfyui/miopen logs
-curl -fSL -C - --connect-timeout 30 --max-time 3600 \
+SDXL_REVISION=c6c10e8716de60c7ef4eed6b89a06f67e772b374
+SDXL_SHA256=e0d996ee0013e79d9d3561f50fcafb9a17e3ff07b780358e3b66d67932c4d490
+SDXL_FILE=data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors
+curl -fSL --connect-timeout 30 --max-time 3600 \
   --retry 5 --retry-delay 10 --retry-all-errors \
-  -o data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors.part \
-  https://huggingface.co/ByteDance/SDXL-Lightning/resolve/main/sdxl_lightning_4step.safetensors
-mv data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors.part \
-  data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors
+  -o "${SDXL_FILE}.part" \
+  "https://huggingface.co/ByteDance/SDXL-Lightning/resolve/${SDXL_REVISION}/sdxl_lightning_4step.safetensors"
+printf '%s  %s\n' "$SDXL_SHA256" "${SDXL_FILE}.part" | sha256sum -c -
+mv -f "${SDXL_FILE}.part" "$SDXL_FILE"
 ```
 
-Expected: Langfuse PostgreSQL and ClickHouse bind-mount directories are owned for their container users; SDXL Lightning checkpoint exists at `data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors`.
+Expected: Langfuse PostgreSQL and ClickHouse bind-mount directories are owned for their container users; SDXL Lightning checkpoint exists only after SHA256 verification succeeds.
 
 Evidence:
 
 ```bash
 stat -c '%U:%G %n' data/langfuse/postgres data/langfuse/clickhouse
-ls -lh data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors
+sha256sum data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors
 ```
 
 Rollback:
@@ -183,49 +194,99 @@ sudo rm -rf data/langfuse/postgres data/langfuse/clickhouse
 rm -f data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors*
 ```
 
-## 7. Create QR1 Docker Networks
+## 7. Create QR1 Docker Network And Fill Gateway
 
-Create/build the QR1 containers without starting them. This creates the Docker networks needed for the Ollama bridge and UFW discovery while still letting host prerequisites be installed before any service starts.
+Create the non-internal ODS Docker network before final render. The internal Langfuse network is intentionally not granted host access.
 
 ```bash
-docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --no-start
-docker compose $(scripts/ms-qr1-compose-flags.sh) ps -a
-docker network ls | grep -E 'ods|langfuse'
+if docker network inspect ods-network >/tmp/qr1-ods-network.inspect.json; then
+  echo "ods-network already exists"
+else
+  docker network create ods-network
+fi
+scripts/ms-qr1-ollama-bridge.sh plan | tee /tmp/qr1-ollama-bridge.plan.txt
+MS_QR1_HOST_GATEWAY="$(awk -F= '$1 == "MS_QR1_HOST_GATEWAY" {print $2}' /tmp/qr1-ollama-bridge.plan.txt | tail -1)"
+test -n "$MS_QR1_HOST_GATEWAY"
+sed -i "s/^MS_QR1_HOST_GATEWAY=.*/MS_QR1_HOST_GATEWAY=${MS_QR1_HOST_GATEWAY}/" .env
+grep -n '^MS_QR1_HOST_GATEWAY=' .env
+docker compose $(scripts/ms-qr1-compose-flags.sh) config > /tmp/qr1-compose.rendered.yml
 ```
 
-Expected: QR1 containers exist but are not running; QR1 Docker networks exist.
+Expected: `MS_QR1_HOST_GATEWAY` is a private Docker gateway IP for `ods-network`; the rendered stack uses `ms-qr1-host:<gateway>` and does not use `host.docker.internal` for Ollama.
 
-Evidence: `docker compose ps -a` and `docker network ls`.
+Evidence: `/tmp/qr1-ollama-bridge.plan.txt`, redacted `.env` line, and `/tmp/qr1-compose.rendered.yml`.
 
 Rollback:
 
 ```bash
-docker compose $(scripts/ms-qr1-compose-flags.sh) down
+sed -i 's/^MS_QR1_HOST_GATEWAY=.*/MS_QR1_HOST_GATEWAY=GENERATE_ME_DOCKER_GATEWAY/' .env
+docker network rm ods-network
 ```
 
-## 8. Narrow Ollama Docker Bridge
+Only remove `ods-network` if no other ODS stack is using it.
 
-Do not set `OLLAMA_HOST=0.0.0.0`. QR1 keeps host-native Ollama loopback-only and installs a narrow host-side `socat` bridge that listens only on discovered Docker gateway IP addresses and forwards to `127.0.0.1:11434`.
+## 8. Install Host-Agent Service
+
+QR1 requires the host-agent on TCP `7710` for the approved dashboard-api host control boundary. The service must be installed before UFW and acceptance checks.
+
+```bash
+agent_tmp="$(mktemp)"
+sed \
+  -e "s|__INSTALL_USER__|$USER|g" \
+  -e "s|__PYTHON3__|$(command -v python3)|g" \
+  -e "s|__INSTALL_DIR__|$PWD|g" \
+  -e "s|__HOME__|$HOME|g" \
+  scripts/systemd/ods-host-agent.service > "$agent_tmp"
+sudo install -m 0644 "$agent_tmp" /etc/systemd/system/ods-host-agent.service
+rm -f "$agent_tmp"
+sudo systemctl daemon-reload
+sudo systemctl enable --now ods-host-agent.service
+systemctl status ods-host-agent.service --no-pager
+ss -tlnp | grep ':7710'
+```
+
+Expected: host-agent is running and listening on the resolved Docker gateway or loopback bind address, never a wildcard listener.
+
+Evidence: rendered service file checksum, `systemctl status`, `journalctl -u ods-host-agent.service -n 30 --no-pager`, and `ss -tlnp`.
+
+Rollback:
+
+```bash
+sudo systemctl disable --now ods-host-agent.service
+sudo rm -f /etc/systemd/system/ods-host-agent.service
+sudo systemctl daemon-reload
+```
+
+## 9. Narrow Ollama Docker Bridge
+
+Do not set `OLLAMA_HOST=0.0.0.0`. QR1 keeps host-native Ollama loopback-only and installs a narrow host-side `socat` bridge that listens only on discovered non-internal Docker gateway IP addresses and forwards to `127.0.0.1:11434`.
 
 Plan first:
 
 ```bash
 scripts/ms-qr1-ollama-bridge.sh plan
+scripts/ms-qr1-ollama-bridge.sh render-unit | tee /tmp/ms-qr1-ollama-bridge.service
+grep 'bind=$$addr' /tmp/ms-qr1-ollama-bridge.service
+grep 'Environment="MS_QR1_OLLAMA_BRIDGE_ADDRS=' /tmp/ms-qr1-ollama-bridge.service
 ```
 
 Install `socat` if absent, then install the bridge:
 
 ```bash
-command -v socat || sudo apt-get install -y socat
+if command -v socat; then
+  echo "socat already installed"
+else
+  sudo apt-get install -y socat
+fi
 sudo scripts/ms-qr1-ollama-bridge.sh install
 curl -fsS http://127.0.0.1:11434/api/tags
 systemctl status ms-qr1-ollama-bridge.service --no-pager
 ss -tlnp | grep ':11434'
 ```
 
-Expected: Ollama still answers on `127.0.0.1:11434`; `ms-qr1-ollama-bridge.service` listens on Docker gateway IP address(es), not `0.0.0.0`.
+Expected: Ollama still answers on `127.0.0.1:11434`; `ms-qr1-ollama-bridge.service` listens on non-internal Docker gateway IP address(es), not `0.0.0.0` or `::`.
 
-Evidence: bridge plan output, `systemctl status`, and `ss -tlnp` showing listener addresses.
+Evidence: bridge plan output, rendered unit, `systemctl status`, and `ss -tlnp` showing listener addresses.
 
 Rollback:
 
@@ -236,45 +297,42 @@ sudo apt-get purge socat
 
 Only purge `socat` if QR1 installed it and no other local service needs it.
 
-## 9. Docker Subnet UFW Rules
+## 10. Docker Subnet UFW Rules
 
 Plan first:
 
 ```bash
-scripts/ms-qr1-ufw-docker-rules.sh plan
+scripts/ms-qr1-ufw-docker-rules.sh plan | tee /tmp/ms-qr1-ufw.plan.txt
 ```
 
-Apply only after verifying the discovered CIDR is a private Docker network:
+Apply only after verifying every discovered CIDR is a private non-internal Docker network:
 
 ```bash
 sudo scripts/ms-qr1-ufw-docker-rules.sh apply
 sudo ufw status numbered
 ```
 
-Expected: narrowly scoped allow rules exist from discovered Docker CIDR(s) to host TCP ports `11434` and `7710` only.
+Expected: narrowly scoped allow rules exist from discovered non-internal Docker CIDR(s) to the matching host gateway TCP ports `11434` and `7710` only. No rule is created for `ods_langfuse-internal`.
 
-Evidence: plan output, apply output, CIDR(s), `ufw status numbered` before/after, and every generated rule number.
+Evidence: plan output, apply output, CIDR(s), `ufw status numbered` before/after, and generated rule comments.
 
 Rollback:
 
 ```bash
-sudo ufw status numbered
-sudo ufw delete <highest-ms-qr1-rule-number>
-sudo ufw delete <next-ms-qr1-rule-number>
-sudo ufw delete <remaining-ms-qr1-rule-number>
+sudo scripts/ms-qr1-ufw-docker-rules.sh remove
 sudo ufw status numbered
 ```
 
-Delete every generated MS QR1 rule in descending rule-number order. A single Docker subnet normally creates two rules: one for `11434/tcp` and one for `7710/tcp`.
+Expected rollback: no `MS QR1 docker-to-host` rules remain. Use the helper rather than deleting numbered rules manually because UFW rule numbers renumber after each delete.
 
-## 10. Start QR1 Stack
+## 11. Start QR1 Stack
 
 ```bash
-docker compose $(scripts/ms-qr1-compose-flags.sh) start
+docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build
 docker compose $(scripts/ms-qr1-compose-flags.sh) ps
 ```
 
-Expected: approved QR1 services start. Native Ollama remains the inference path; no AMD tuning, UMA/GTT/IOMMU, Lemonade, ODS Tailscale, OpenClaw, Brave Search, ods-proxy, or ODS OpenCode extension starts.
+Expected: approved QR1 services start. Native Ollama remains the inference path; no AMD tuning, UMA/GTT/IOMMU, Lemonade, ODS Tailscale, OpenClaw, Brave Search, ods-proxy, ODS OpenCode extension, remote-provider egress service, or remote-provider SSH tunnel starts.
 
 Evidence: `docker compose ps`.
 
@@ -284,22 +342,26 @@ Rollback:
 docker compose $(scripts/ms-qr1-compose-flags.sh) down
 ```
 
-## 11. Container-To-Host Inference Boundary
+If `docker compose down`, Docker network removal, or subnet reallocation occurs, rerun sections 7, 9, and 10 before starting QR1 again. The helpers intentionally rediscover current network gateways and rules rather than assuming a fixed Docker CIDR.
+
+## 12. Container-To-Host Inference Boundary
 
 ```bash
-docker compose $(scripts/ms-qr1-compose-flags.sh) exec litellm \
-  python3 -c 'import urllib.request; print(urllib.request.urlopen("http://host.docker.internal:11434/api/tags", timeout=5).status)'
+docker compose $(scripts/ms-qr1-compose-flags.sh) exec -T litellm \
+  python3 -c 'import urllib.request; print(urllib.request.urlopen("http://ms-qr1-host:11434/api/tags", timeout=5).status)'
+docker compose $(scripts/ms-qr1-compose-flags.sh) exec -T dashboard-api \
+  python3 -c 'import urllib.request; print(urllib.request.urlopen("http://ms-qr1-host:11434/api/tags", timeout=5).status)'
 ss -tlnp | grep ':11434'
 sudo ufw status numbered
 ```
 
-Expected: the LiteLLM container receives HTTP `200` from host-native Ollama through `host.docker.internal`; host `ss` shows no `0.0.0.0:11434` listener; UFW permits only Docker CIDR(s) to port `11434`.
+Expected: containers receive HTTP `200` from host-native Ollama through `ms-qr1-host`; host `ss` shows no `0.0.0.0:11434` or `[::]:11434` listener; UFW permits only non-internal Docker CIDR(s) to the Docker gateway on port `11434`.
 
 Evidence: command outputs.
 
-Rollback: remove the Ollama bridge in section 8 and UFW rules in section 9.
+Rollback: remove the Ollama bridge in section 9 and UFW rules in section 10.
 
-## 12. Tailscale Serve
+## 13. Tailscale Serve
 
 Use host tailscaled only. Do not enable the ODS Tailscale extension or ods-proxy.
 
@@ -323,12 +385,12 @@ sudo tailscale serve reset
 tailscale serve status
 ```
 
-## 13. Acceptance Checks
+## 14. Acceptance Checks
 
 Blocking QR1 gate:
 
 ```bash
-EXPECTED_MODEL=qwen3.8:27b scripts/ms-qr1-acceptance.sh
+sudo EXPECTED_MODEL=qwen3.8:27b ENV_FILE="$PWD/.env" scripts/ms-qr1-acceptance.sh
 python scripts/audit-extensions.py
 bash tests/test-safe-env.sh
 bash tests/test-secret-security.sh
@@ -336,21 +398,24 @@ bash tests/test-ms-qr1-helpers.sh
 python tests/contracts/test-network-exposure-contracts.py
 ```
 
-Expected: acceptance checks pass. Qdrant unauthenticated requests must be rejected. Hermes host port `9119` must be unbound. Local-only LiteLLM routes must have no fallback. Host-agent nmcli endpoints must reject unauthenticated requests on the resolved host-agent bind address.
+Expected: acceptance checks pass. Qdrant unauthenticated requests must be rejected. Hermes host port `9119` must be unbound. Local-only LiteLLM routes must have no fallback. Rendered QR1 services must match the allow-list/exclusion policy. Every rendered published QR1 service port must bind loopback. Host-agent nmcli endpoints must reject unauthenticated requests on the resolved host-agent bind address.
 
 Diagnostic, not a QR1 blocking gate:
 
 ```bash
-bash tests/test-network-security.sh || true
+set +e
+bash tests/test-network-security.sh
+echo "diagnostic exit=$?"
+set -e
 ```
 
 Expected diagnostic result as of PR #6: the static script reports broad findings against optional compose files and the ODS Tailscale host-network extension while also reporting zero insecure port bindings. Record the output, but do not treat it as the QR1 deploy gate because it does not model the explicit QR1 compose file set.
 
 Evidence: command outputs.
 
-Rollback for failed blocking acceptance: capture logs, then run the stack rollback in section 10, UFW rollback in section 9, and Ollama bridge rollback in section 8.
+Rollback for failed blocking acceptance: capture logs, then run the stack rollback in section 11, UFW rollback in section 10, Ollama bridge rollback in section 9, and host-agent rollback in section 8.
 
-## 14. Host-Agent nmcli Boundary
+## 15. Host-Agent nmcli Boundary
 
 No supported QR1 config switch exists to remove the host-agent nmcli/Wi-Fi routes. QR1 keeps stock host-agent behavior and relies on API-key authentication plus Docker-gateway/UFW scoping.
 
@@ -359,10 +424,7 @@ Derive the actual Linux bind address and test unauthenticated access:
 ```bash
 AGENT_BIND="$(awk -F= '$1 == "ODS_AGENT_BIND" {print $2}' .env | tail -1)"
 if [ -z "$AGENT_BIND" ]; then
-  AGENT_BIND="$(docker network inspect ods-network --format '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' 2>/dev/null | awk 'NF {print; exit}')"
-fi
-if [ -z "$AGENT_BIND" ]; then
-  AGENT_BIND="$(docker network inspect bridge --format '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' 2>/dev/null | awk 'NF {print; exit}')"
+  AGENT_BIND="$(docker network inspect ods-network --format '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' | awk 'NF {print; exit}')"
 fi
 curl -i "http://${AGENT_BIND:-127.0.0.1}:7710/v1/network/wifi-scan"
 curl -i -X POST "http://${AGENT_BIND:-127.0.0.1}:7710/v1/network/wifi-connect" \
@@ -380,18 +442,18 @@ Rollback: stop host-agent if the boundary fails:
 sudo systemctl stop ods-host-agent.service
 ```
 
-## 15. Full Rollback
+## 16. Full Rollback
 
 ```bash
 cd ~/ms-ops/ops-centre/ods
 docker compose $(scripts/ms-qr1-compose-flags.sh) down
 sudo tailscale serve reset
+sudo scripts/ms-qr1-ufw-docker-rules.sh remove
 sudo scripts/ms-qr1-ollama-bridge.sh remove
-sudo ufw status numbered
-sudo ufw delete <highest-ms-qr1-rule-number>
-sudo ufw delete <next-ms-qr1-rule-number>
-sudo ufw delete <remaining-ms-qr1-rule-number>
+sudo systemctl disable --now ods-host-agent.service
+sudo rm -f /etc/systemd/system/ods-host-agent.service
+sudo systemctl daemon-reload
 shred -u .env
 ```
 
-Expected: QR1 containers stopped, Tailscale serve mappings removed, Ollama bridge removed, every QR1 UFW rule removed, and secrets removed from disk.
+Expected: QR1 containers stopped, Tailscale serve mappings removed, every QR1 UFW rule removed, Ollama bridge removed, host-agent removed, and secrets removed from disk.

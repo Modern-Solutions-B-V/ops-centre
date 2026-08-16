@@ -15,7 +15,7 @@ files=(
   extensions/services/embeddings/compose.yaml
   extensions/services/hermes/compose.yaml
   extensions/services/hermes-proxy/compose.yaml
-  extensions/services/langfuse/compose.yaml
+  extensions/services/langfuse/compose.yaml.disabled
   extensions/services/litellm/compose.yaml
   extensions/services/n8n/compose.yaml
   extensions/services/perplexica/compose.yaml
@@ -35,5 +35,5 @@ for file in "${files[@]}"; do
   fi
 done
 
-printf -- '-f %q ' "${files[@]}"
+printf -- '-f %s ' "${files[@]}"
 printf '\n'

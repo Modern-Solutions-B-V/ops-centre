@@ -8,7 +8,7 @@ services:
 
   litellm:
     extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "ms-qr1-host:${MS_QR1_HOST_GATEWAY:?MS_QR1_HOST_GATEWAY must be discovered with scripts/ms-qr1-ollama-bridge.sh plan}"
     volumes:
       - ./config/litellm/ms-qr1.yaml:/app/config.yaml:ro,z
     environment:
@@ -28,14 +28,18 @@ services:
       OPENAI_API_KEY: "${LITELLM_KEY:?LITELLM_KEY must be generated for QR1}"
 
   dashboard-api:
+    extra_hosts:
+      - "ms-qr1-host:${MS_QR1_HOST_GATEWAY:?MS_QR1_HOST_GATEWAY must be discovered with scripts/ms-qr1-ollama-bridge.sh plan}"
     environment:
       LLM_BACKEND: external
       LLM_API_BASE_PATH: /v1
-      LLM_URL: "http://host.docker.internal:11434"
-      OLLAMA_URL: "http://host.docker.internal:11434"
-      ODS_TALK_VISION_URL: "http://host.docker.internal:11434/v1"
+      LLM_URL: "http://ms-qr1-host:11434"
+      OLLAMA_URL: "http://ms-qr1-host:11434"
+      ODS_TALK_VISION_URL: "http://ms-qr1-host:11434/v1"
 
   hermes:
+    extra_hosts:
+      - "ms-qr1-host:${MS_QR1_HOST_GATEWAY:?MS_QR1_HOST_GATEWAY must be discovered with scripts/ms-qr1-ollama-bridge.sh plan}"
     environment:
       HERMES_DASHBOARD_TUI: "0"
       HERMES_LLM_BASE_URL: "http://litellm:4000/v1"
@@ -66,5 +70,13 @@ services:
       - ms-qr1-excluded
 
   brave-search:
+    profiles:
+      - ms-qr1-excluded
+
+  remote-provider-egress:
+    profiles:
+      - ms-qr1-excluded
+
+  remote-provider-ssh-tunnel:
     profiles:
       - ms-qr1-excluded

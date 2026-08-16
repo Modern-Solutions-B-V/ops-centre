@@ -48,6 +48,8 @@ token-spy/*.sqlite
 ods/.env
 ods/.env.*
 !ods/.env.example
+ods/profiles/*.env
+!ods/profiles/*.env.example
 ods/data/
 ods/models/
 ods/config/openclaw/workspace/

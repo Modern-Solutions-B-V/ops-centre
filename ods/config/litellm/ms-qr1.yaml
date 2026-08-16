@@ -2,13 +2,13 @@ model_list:
   - model_name: local
     litellm_params:
       model: openai/qwen3.8:27b
-      api_base: http://host.docker.internal:11434/v1
+      api_base: http://ms-qr1-host:11434/v1
       api_key: not-needed
 
   - model_name: default
     litellm_params:
       model: openai/qwen3.8:27b
-      api_base: http://host.docker.internal:11434/v1
+      api_base: http://ms-qr1-host:11434/v1
       api_key: not-needed
 
   - model_name: anthropic/claude-sonnet-5
