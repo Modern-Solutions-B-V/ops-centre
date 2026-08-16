@@ -1,6 +1,15 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Modern Solutions Fork Rules
+
+Read `docs/ms/` and `AGENTS.md` before making changes.
+
+Every behavioral change MUST update:
+`docs/ms/ODS-MS-CHANGELOG.md`
+
+See `AGENTS.md` for full constraints.
+
 
 ## Project Overview
 
