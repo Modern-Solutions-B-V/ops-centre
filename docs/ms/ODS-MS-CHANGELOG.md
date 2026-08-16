@@ -113,12 +113,14 @@ Low. Additive MS documentation only; no ODS runtime files are changed.
 - `sed -n '1,260p' docs/ms/decisions/ODS-ADOPTION.md`
 - `sed -n '1,220p' AGENTS.md`
 - `sed -n '1,220p' CLAUDE.md`
-- `git diff -- docs/ms/ODS-MS-CHANGELOG.md`
+- `git diff --stat origin/ms/main...HEAD`
+- `git diff --check`
 
 ### Rollback
-Revert the `docs/agent-governance` PR/commit. Manual rollback is to remove
-`AGENTS.md`, remove the "Modern Solutions Fork Rules" section from
-`CLAUDE.md`, and remove this `MSODS-0002` changelog entry.
+To roll back the governance policy, run `git revert -m 1 b3377e9c` to revert
+PR #3, then revert the follow-up changelog PR/commit that adds this entry.
+Manual rollback is to remove `AGENTS.md`, remove the "Modern Solutions Fork
+Rules" section from `CLAUDE.md`, and remove this `MSODS-0002` changelog entry.
 
 ### Notes
 This entry records the repository-wide policy introduced by `AGENTS.md` and
