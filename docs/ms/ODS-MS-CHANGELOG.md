@@ -59,6 +59,84 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-16 — QR1 security threat model (independent review)
+
+### Change ID
+`MSODS-0003`
+
+### Agent / Author
+Claude Opus 4.8 (1M context) — acting as independent security reviewer
+
+### Branch / PR
+`analysis/security` / PR pending (not self-approved, not self-merged)
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`EXTEND` (additive MS security documentation; no ODS runtime files changed)
+
+### Files changed
+- `docs/ms/security/ODS-QR1-THREAT-MODEL.md` (new)
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Provide the independent QR1 threat model required before the broad ODS
+capability set is progressively trusted. Classifies every capability
+(inference, agents, code execution, research/data, privacy/observability,
+control plane, egress, secrets, persistence, updates, supply chain) with a
+permission level, the machine-enforced restriction required, and the evidence
+needed before trust is raised. Reviews the initial deny policy (PR merge, email
+send, Jira write, client-system writes, production secret access, sudo/root,
+unrestricted shell, arbitrary egress, external fallback for confidential/
+local-only workloads).
+
+### MS requirement / ADR
+`docs/ms/decisions/ODS-ADOPTION.md` (progressive machine-enforced trust);
+`AGENTS.md` R6/R8/R9/R10/R13/R14.
+
+### Behavior before
+No consolidated MS threat model for the QR1 capability set; no per-component
+permission-level ladder or machine-enforcement gap register.
+
+### Behavior after
+`docs/ms/security/ODS-QR1-THREAT-MODEL.md` records assets, trust boundaries,
+threats, current ODS mitigations, MS gaps, initial permission level, required
+machine-enforced restriction, evidence-to-trust, ACCEPT/CONFIGURE/EXTEND/
+CORE CHANGE/REJECT classification, and a verification test per component, plus
+the deny-policy review and a prioritized gap register. Documentation only — no
+runtime behavior changes.
+
+### Security / privacy impact
+Positive (analysis). Surfaces the highest-priority machine-enforcement gaps:
+G1 APE not wired in / not deny-by-default; G2 silent local→cloud fallback and
+advisory-only offline mode (R10 violation); G3 no default-deny egress. No
+secrets, hostnames, or credential values are included in the document (R8).
+
+### Upgrade / upstream impact
+Low. Additive MS docs under `docs/ms/`; no ODS runtime files touched; upstream
+mergeability preserved.
+
+### Validation performed
+- Static inspection of compose, manifests, Dockerfiles, service source,
+  installer, and configs across all 27 bundled services (evidence cited as
+  `path:line` in the document).
+- `git diff --check` (whitespace) — to run before commit.
+- No runtime tests executed; this is a documentation/analysis change. The
+  document's §12 lists the existing contract/security tests it relies on as the
+  machine baseline and the new tests each remediation task must add.
+
+### Rollback
+Remove `docs/ms/security/ODS-QR1-THREAT-MODEL.md` and this `MSODS-0003` entry
+(`git revert` the doc commit).
+
+### Notes
+Analysis only — no fixes implemented. Each gap in §11 becomes its own
+one-task/one-branch change per `AGENTS.md`. Author is the reviewer and does not
+approve or merge this work (R13–R14).
+
+---
+
 ## 2026-08-16 — Add repository agent governance rules
 
 ### Change ID
