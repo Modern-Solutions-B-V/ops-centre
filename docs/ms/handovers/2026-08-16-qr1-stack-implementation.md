@@ -14,13 +14,16 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 - QR1 compose file selector: `ods/scripts/ms-qr1-compose-flags.sh`.
 - Langfuse enabled from the shipped dormant template: `ods/extensions/services/langfuse/compose.yaml`.
 - UFW Docker-subnet discovery helper: `ods/scripts/ms-qr1-ufw-docker-rules.sh`.
+- Narrow host Ollama bridge helper: `ods/scripts/ms-qr1-ollama-bridge.sh`.
 - QR1 acceptance helper: `ods/scripts/ms-qr1-acceptance.sh`.
+- QR1 helper regression tests: `ods/tests/test-ms-qr1-helpers.sh`.
 - Operator runbook: `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`.
-- Changelog entry: `MSODS-0004`.
+- Changelog entries: `MSODS-0004`, `MSODS-0005`.
 
 ## Boundaries
 
 - Native host Ollama remains the inference path.
+- QR1 does not bind Ollama to `0.0.0.0`; containers reach it through a host-side `socat` bridge bound only to discovered Docker gateway address(es), with UFW scoped to Docker CIDR(s).
 - No AMD tuning, UMA/GTT/IOMMU, Lemonade, email, Jira, client-system credentials, production secrets, ODS Tailscale extension, ods-proxy, Brave Search, OpenClaw, or ODS OpenCode extension are enabled.
 - Hermes dashboard TUI is forced off with `HERMES_DASHBOARD_TUI=0`.
 - Qdrant and SearXNG require non-empty generated secrets.
@@ -35,11 +38,13 @@ EXPECTED_MODEL=<qr1-ollama-model> scripts/ms-qr1-acceptance.sh
 python scripts/audit-extensions.py
 bash tests/test-safe-env.sh
 bash tests/test-secret-security.sh
-bash tests/test-network-security.sh
+bash tests/test-ms-qr1-helpers.sh
 python tests/contracts/test-network-exposure-contracts.py
 git diff --check
 ```
 
+`bash tests/test-network-security.sh || true` remains diagnostic evidence only. It is not a blocking QR1 deploy gate because it does not model the explicit QR1 compose file set.
+
 ## Rollback
 
-Follow `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md` sections 7 and 11: stop the compose stack, remove Tailscale serve mappings, delete the MS QR1 UFW rules by number in descending order, and shred the filled `.env`.
+Follow `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`: stop the compose stack, remove Tailscale serve mappings, remove the MS QR1 Ollama bridge, delete every MS QR1 UFW rule by number in descending order, and shred the filled `.env`.

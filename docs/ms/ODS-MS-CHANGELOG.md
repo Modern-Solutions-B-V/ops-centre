@@ -8,6 +8,105 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-16 — Correct QR1 deployment review findings
+
+### Change ID
+`MSODS-0005`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`feature/qr1-stack` / PR #6
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`CONFIGURE` + `EXTEND`
+
+### Files changed
+- `ods/scripts/ms-qr1-ufw-docker-rules.sh`
+- `ods/scripts/ms-qr1-ollama-bridge.sh`
+- `ods/scripts/ms-qr1-acceptance.sh`
+- `ods/tests/test-ms-qr1-helpers.sh`
+- `ods/profiles/ms-qr1.env.example`
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Resolve first-round review findings against QR1 PR #6 without touching EVO-X3
+or widening network exposure.
+
+### MS requirement / ADR
+QR1 cross-review D-6; BLK-1..4; local-only routes must not silently fall back
+or widen to LAN.
+
+### Behavior before
+QR1 containers were configured to use `host.docker.internal:11434`, but the
+runbook did not make a loopback-only host Ollama listener reachable from
+Docker. The UFW helper inspected Compose network keys rather than rendered
+Docker network names and lost piped interface data to a Python heredoc. The
+acceptance helper lost Ollama JSON the same way. The runbook started Compose
+before the Langfuse ownership hook, did not provision the ComfyUI checkpoint,
+kept a known-failing broad network-security script in the blocking gate,
+probed host-agent nmcli endpoints on loopback instead of the resolved Linux
+bind address, and documented rollback for only one UFW rule. The Langfuse DB
+password placeholder used standard base64, which can contain URL-unsafe `/`.
+
+### Behavior after
+QR1 installs an explicit, removable `ms-qr1-ollama-bridge.service` that binds
+only discovered Docker gateway IP address(es) on port 11434 and forwards to
+`127.0.0.1:11434`; Ollama itself remains loopback-only and is never bound to
+`0.0.0.0`. The UFW helper uses rendered Compose network names and validates
+CIDRs against host interface data without stdin loss. The acceptance helper
+feeds Ollama model JSON through an environment variable and probes host-agent
+nmcli routes at the resolved bind address. The runbook provisions Langfuse
+ownership and the SDXL checkpoint before service start, creates networks
+without starting containers, installs the Ollama bridge and UFW rules before
+starting containers, records every UFW rule for descending-order rollback, and
+treats `test-network-security.sh` as diagnostic only. Langfuse DB passwords
+now use hex placeholders.
+
+### Security / privacy impact
+Positive. The Ollama connectivity fix is limited to Docker gateway addresses
+plus Docker-CIDR UFW rules; it does not expose Ollama on LAN, tailnet, or
+`0.0.0.0`. Rollback now removes every QR1 firewall rule and the bridge service.
+
+### Upgrade / upstream impact
+Low. Changes are additive MS-owned scripts/tests/docs/profile updates. No ODS
+core runtime or installer code is changed.
+
+### Validation performed
+- `bash tests/test-ms-qr1-helpers.sh`
+- `bash -n ods/scripts/ms-qr1-compose-flags.sh ods/scripts/ms-qr1-ufw-docker-rules.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-acceptance.sh`
+- `docker compose --env-file profiles/ms-qr1.env.example $(./scripts/ms-qr1-compose-flags.sh) config`
+- `python ods/scripts/audit-extensions.py`
+- `bash tests/test-safe-env.sh`
+- `bash tests/test-secret-security.sh`
+- `python tests/contracts/test-network-exposure-contracts.py`
+- `git diff --check`
+- secret scan of changed files for real keys/tokens
+
+`bash tests/test-network-security.sh` remains diagnostic-only for QR1; it is
+not a blocking gate until it can be scoped to the explicit QR1 compose file
+set.
+
+### Rollback
+Repository rollback: revert the MSODS-0005 correction commit.
+
+Host rollback if already deployed: run `sudo scripts/ms-qr1-ollama-bridge.sh
+remove`, delete every MS QR1 UFW rule in descending rule-number order, stop
+the QR1 compose stack, remove Tailscale serve mappings, and shred the filled
+`.env`.
+
+### Notes
+The host-agent nmcli surface still has no upstream CONFIGURE switch. QR1 keeps
+stock behavior and tests unauthenticated denial at the resolved bind address.
+
+---
+
 ## 2026-08-16 — Add QR1 deployment profile
 
 ### Change ID

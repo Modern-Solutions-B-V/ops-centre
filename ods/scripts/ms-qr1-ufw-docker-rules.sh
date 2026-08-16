@@ -24,14 +24,22 @@ command -v ufw >/dev/null 2>&1 || { echo "ERROR: ufw is required" >&2; exit 1; }
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 is required" >&2; exit 1; }
 command -v ip >/dev/null 2>&1 || { echo "ERROR: iproute2 'ip' is required" >&2; exit 1; }
 
-if [[ ! -x scripts/resolve-compose-stack.sh ]]; then
+if [[ ! -x scripts/ms-qr1-compose-flags.sh ]]; then
   echo "ERROR: run from the ods/ directory" >&2
   exit 1
 fi
 
 mapfile -t networks < <(
   docker compose $(scripts/ms-qr1-compose-flags.sh) config --format json \
-    | python3 -c 'import json,sys; data=json.load(sys.stdin); print("\n".join(data.get("networks", {}).keys()))'
+    | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for key, network in data.get("networks", {}).items():
+    if isinstance(network, dict):
+        print(network.get("name") or key)
+    else:
+        print(key)
+'
 )
 
 if [[ "${#networks[@]}" -eq 0 ]]; then
@@ -69,10 +77,11 @@ mapfile -t unique_cidrs < <(printf '%s\n' "${cidrs[@]}" | sort -u)
 
 interface_addrs="$(ip -o -4 addr show)"
 for cidr in "${unique_cidrs[@]}"; do
-  if ! printf '%s\n' "$interface_addrs" | python3 - "$cidr" <<'PY'
+  if ! INTERFACE_ADDRS="$interface_addrs" python3 - "$cidr" <<'PY'
+import os
 import ipaddress, sys
 network = ipaddress.ip_network(sys.argv[1], strict=False)
-for line in sys.stdin:
+for line in os.environ.get("INTERFACE_ADDRS", "").splitlines():
     parts = line.split()
     for part in parts:
         if "/" not in part:

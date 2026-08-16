@@ -93,16 +93,43 @@ check_no_changeme() {
 
 check_model_identity() {
   [[ -n "$EXPECTED_MODEL" ]] || { echo "set EXPECTED_MODEL to run identity check" >&2; return 1; }
-  curl -fsS "$OLLAMA_URL/api/tags" \
-    | python3 - "$EXPECTED_MODEL" <<'PY'
+  response="$(curl -fsS "$OLLAMA_URL/api/tags")"
+  OLLAMA_TAGS_JSON="$response" python3 - "$EXPECTED_MODEL" <<'PY'
+import os
 import json, sys
 expected = sys.argv[1]
-data = json.load(sys.stdin)
+data = json.loads(os.environ["OLLAMA_TAGS_JSON"])
 models = {m.get("name") for m in data.get("models", [])}
 if expected not in models:
     print(f"{expected} not present in Ollama models: {sorted(models)}", file=sys.stderr)
     sys.exit(1)
 PY
+}
+
+discover_host_agent_url() {
+  if [[ -n "${HOST_AGENT_URL:-}" ]]; then
+    printf '%s\n' "$HOST_AGENT_URL"
+    return 0
+  fi
+  local bind=""
+  if [[ -f "$ENV_FILE" ]]; then
+    bind="$(awk -F= '$1 == "ODS_AGENT_BIND" {print $2}' "$ENV_FILE" | tail -1)"
+  fi
+  if [[ -z "$bind" && command -v docker >/dev/null 2>&1 ]]; then
+    bind="$(docker network inspect ods-network --format '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' 2>/dev/null | awk 'NF {print; exit}')"
+  fi
+  if [[ -z "$bind" && command -v docker >/dev/null 2>&1 ]]; then
+    bind="$(docker network inspect bridge --format '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' 2>/dev/null | awk 'NF {print; exit}')"
+  fi
+  bind="${bind:-127.0.0.1}"
+  printf 'http://%s:%s\n' "$bind" "${ODS_AGENT_PORT:-7710}"
+}
+
+check_host_agent_nmcli_boundary() {
+  local url status
+  url="$(discover_host_agent_url)"
+  status="$(curl -fsS -o /dev/null -w '%{http_code}' "$url/v1/network/wifi-scan" || true)"
+  [[ "$status" == "401" || "$status" == "403" ]]
 }
 
 check_ufw_rules() {
@@ -117,6 +144,7 @@ check "Hermes TUI/9119 disabled" check_hermes_tui
 check "Qdrant rejects unauthenticated requests" check_qdrant_auth
 check "rendered env/config contains no placeholders" check_no_changeme
 check "Ollama model identity matches EXPECTED_MODEL" check_model_identity
+check "Host-agent nmcli endpoints reject unauthenticated requests" check_host_agent_nmcli_boundary
 check "UFW contains QR1 Docker-to-host rules" check_ufw_rules
 
 if [[ "$failures" -gt 0 ]]; then
