@@ -5,11 +5,24 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/ms-qr1-helpers.XXXXXX")"
-trap 'rm -rf "$tmpdir"' EXIT
+bridge_script="scripts/ms-qr1-ollama-bridge.sh"
+bridge_script_original="$tmpdir/ms-qr1-ollama-bridge.sh.original"
+restore_bridge_script() {
+  if [[ -f "$bridge_script_original" ]]; then
+    cp "$bridge_script_original" "$bridge_script"
+    chmod +x "$bridge_script"
+  fi
+}
+cleanup() {
+  restore_bridge_script
+  rm -rf "$tmpdir"
+}
+trap cleanup EXIT
+cp "$bridge_script" "$bridge_script_original"
 
 assert_contains() {
   local needle="$1" file="$2"
-  grep -F "$needle" "$file" >/dev/null || {
+  grep -F -- "$needle" "$file" >/dev/null || {
     echo "missing expected text: $needle" >&2
     echo "--- $file ---" >&2
     cat "$file" >&2
@@ -19,7 +32,7 @@ assert_contains() {
 
 assert_not_contains() {
   local needle="$1" file="$2"
-  if grep -F "$needle" "$file" >/dev/null; then
+  if grep -F -- "$needle" "$file" >/dev/null; then
     echo "unexpected text present: $needle" >&2
     echo "--- $file ---" >&2
     cat "$file" >&2
@@ -27,11 +40,40 @@ assert_not_contains() {
   fi
 }
 
+snapshot_path() {
+  python3 - "$1" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if path.is_dir() and not path.is_symlink():
+    paths = [path, *sorted(path.rglob("*"))]
+else:
+    paths = [path]
+entries = []
+for item in paths:
+    st = os.lstat(item)
+    digest = "-"
+    if stat.S_ISREG(st.st_mode):
+        digest = hashlib.sha256(item.read_bytes()).hexdigest()
+    entries.append(f"{item.relative_to(path.parent)} {st.st_uid}:{st.st_gid}:{stat.S_IMODE(st.st_mode):04o}:{digest}")
+print("\n".join(entries))
+PY
+}
+
 cat > "$tmpdir/docker" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "compose" && " $* " == *" config "* ]]; then
-  cat "$FIXTURE_DIR/compose-config.json"
+  python3 - "${FIXTURE_COMPOSE_CONFIG:-$FIXTURE_DIR/compose-config.json}" "${FIXTURE_N8N_USER:-1000:1000}" <<'PY'
+from pathlib import Path
+import sys
+
+print(Path(sys.argv[1]).read_text().replace("__N8N_USER__", sys.argv[2]), end="")
+PY
   exit 0
 fi
 if [[ "${1:-}" == "network" && "${2:-}" == "inspect" ]]; then
@@ -56,6 +98,27 @@ if [[ "${1:-}" == "network" && "${2:-}" == "inspect" ]]; then
   esac
   exit 0
 fi
+if [[ "${1:-}" == "ps" ]]; then
+  if [[ "${DOCKER_PS_FAIL:-0}" == "1" ]]; then
+    echo "fixture docker ps failure" >&2
+    exit 51
+  fi
+  if [[ "${DOCKER_PS_STOPPED_HERMES:-0}" == "1" ]]; then
+    exit 0
+  fi
+  if [[ "${DOCKER_PS_HAS_HERMES:-0}" == "1" ]]; then
+    echo "ods-hermes"
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "exec" && "${2:-}" == "ods-hermes" ]]; then
+  if [[ "${DOCKER_EXEC_FAIL:-0}" == "1" ]]; then
+    echo "fixture docker exec failure" >&2
+    exit 52
+  fi
+  printf '%s\n' "$*" >> "$FIXTURE_DIR/docker-exec.log"
+  exit 0
+fi
 echo "unexpected docker command: $*" >&2
 exit 47
 SH
@@ -63,6 +126,22 @@ SH
 cat > "$tmpdir/sudo" <<'SH'
 #!/usr/bin/env bash
 exec "$@"
+SH
+
+cat > "$tmpdir/systemctl" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FIXTURE_DIR/systemctl.log"
+if [[ "${1:-}" == "status" ]]; then
+  echo "fixture status for ${2:-}"
+fi
+SH
+
+cat > "$tmpdir/chown" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FIXTURE_DIR/chown.log"
+exit 0
 SH
 
 cat > "$tmpdir/ufw" <<'SH'
@@ -115,7 +194,22 @@ echo "unexpected ip command: $*" >&2
 exit 49
 SH
 
-chmod +x "$tmpdir/docker" "$tmpdir/sudo" "$tmpdir/ufw" "$tmpdir/ip"
+cat > "$tmpdir/ss" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${SS_FAIL:-0}" == "1" ]]; then
+  echo "fixture ss failure" >&2
+  exit 53
+fi
+if [[ "$*" == "-tlnp" || "$*" == "-tln" ]]; then
+  cat "$FIXTURE_DIR/ss-state.txt"
+  exit 0
+fi
+echo "unexpected ss command: $*" >&2
+exit 50
+SH
+
+chmod +x "$tmpdir/docker" "$tmpdir/sudo" "$tmpdir/systemctl" "$tmpdir/chown" "$tmpdir/ufw" "$tmpdir/ip" "$tmpdir/ss"
 
 cat > "$tmpdir/compose-config.json" <<'JSON'
 {
@@ -146,6 +240,10 @@ cat > "$tmpdir/compose-config.json" <<'JSON'
     "token-spy": {
       "extra_hosts": ["ms-qr1-host=172.31.0.1"],
       "environment": {"OLLAMA_URL": "http://ms-qr1-host:11434"}
+    },
+    "n8n": {
+      "user": "__N8N_USER__",
+      "volumes": ["./data/n8n:/home/node/.n8n:z"]
     }
   }
 }
@@ -183,7 +281,8 @@ cat > "$tmpdir/ip-addr.txt" <<'EOF'
 9: br-internal inet 172.29.0.1/16 brd 172.29.255.255 scope global br-internal
 EOF
 
-env_prefix=(env FIXTURE_DIR="$tmpdir" PATH="$tmpdir:$PATH")
+bridge_libexec="$tmpdir/libexec/ms-qr1"
+env_prefix=(env FIXTURE_DIR="$tmpdir" MS_QR1_OLLAMA_LIBEXEC_DIR="$bridge_libexec" PATH="$tmpdir:$PATH")
 
 "${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh plan > "$tmpdir/ufw-plan.out"
 assert_contains "172.31.0.0/16 -> 172.31.0.1:11434/tcp" "$tmpdir/ufw-plan.out"
@@ -239,14 +338,14 @@ cat > "$tmpdir/network-ods-network.json" <<'JSON'
     "Name": "ods-network",
     "IPAM": {
       "Config": [
-        {"Subnet": "172.32.0.0/16", "Gateway": "172.32.0.1"}
+        {"Subnet": "172.30.0.0/16", "Gateway": "172.30.0.1"}
       ]
     }
   }
 ]
 JSON
 cat > "$tmpdir/ip-addr.txt" <<'EOF'
-7: br-a inet 172.32.0.1/16 brd 172.32.255.255 scope global br-a
+7: br-a inet 172.30.0.1/16 brd 172.30.255.255 scope global br-a
 8: br-b inet 172.20.0.1/16 brd 172.20.255.255 scope global br-b
 9: br-internal inet 172.29.0.1/16 brd 172.29.255.255 scope global br-internal
 EOF
@@ -264,27 +363,539 @@ cat > "$tmpdir/ip-addr.txt" <<'EOF'
 EOF
 
 "${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh render-unit > "$tmpdir/bridge.unit"
-assert_contains 'Environment="MS_QR1_OLLAMA_BRIDGE_ADDRS=172.20.0.1 172.31.0.1"' "$tmpdir/bridge.unit"
-assert_contains 'if [ -z "$$MS_QR1_OLLAMA_BRIDGE_ADDRS" ]; then exit 64; fi' "$tmpdir/bridge.unit"
-assert_contains 'for addr in $$MS_QR1_OLLAMA_BRIDGE_ADDRS' "$tmpdir/bridge.unit"
-assert_contains 'bind=$$addr' "$tmpdir/bridge.unit"
-assert_not_contains 'bind=,' "$tmpdir/bridge.unit"
+assert_contains 'Description=MS QR1 Ollama Docker HTTP bridge' "$tmpdir/bridge.unit"
+assert_contains "WorkingDirectory=\"$PWD\"" "$tmpdir/bridge.unit"
+assert_contains "ExecStart=\"$bridge_libexec/ms-qr1-ollama-bridge.sh\" serve" "$tmpdir/bridge.unit"
+assert_not_contains "ExecStart=\"$PWD/scripts/ms-qr1-ollama-bridge.sh\" serve" "$tmpdir/bridge.unit"
+assert_contains 'Environment="MS_QR1_OLLAMA_MAX_BODY_BYTES=268435456"' "$tmpdir/bridge.unit"
+assert_contains 'Environment="MS_QR1_OLLAMA_UPSTREAM_TIMEOUT=300"' "$tmpdir/bridge.unit"
+assert_contains 'NoNewPrivileges=true' "$tmpdir/bridge.unit"
+assert_contains 'PrivateTmp=true' "$tmpdir/bridge.unit"
+assert_contains 'ProtectSystem=strict' "$tmpdir/bridge.unit"
+assert_not_contains 'MS_QR1_OLLAMA_BRIDGE_ADDRS=' "$tmpdir/bridge.unit"
+assert_not_contains 'socat' "$tmpdir/bridge.unit"
 assert_not_contains '0.0.0.0' "$tmpdir/bridge.unit"
 assert_not_contains '172.29.0.1' "$tmpdir/bridge.unit"
 
+"${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh expected-listeners > "$tmpdir/bridge.listeners"
+assert_contains '172.20.0.1' "$tmpdir/bridge.listeners"
+assert_contains '172.31.0.1' "$tmpdir/bridge.listeners"
+assert_not_contains '172.29.0.1' "$tmpdir/bridge.listeners"
+
 "${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh plan > "$tmpdir/bridge.plan"
 assert_contains 'MS_QR1_HOST_GATEWAY=172.31.0.1' "$tmpdir/bridge.plan"
+assert_contains 'QR1 HTTP proxy' "$tmpdir/bridge.plan"
+assert_contains 'Host to localhost:11434' "$tmpdir/bridge.plan"
 assert_contains 'systemctl daemon-reload' scripts/ms-qr1-ollama-bridge.sh
 assert_contains 'systemctl restart "$SERVICE_NAME"' scripts/ms-qr1-ollama-bridge.sh
 python3 - <<'PY'
 from pathlib import Path
 text = Path("scripts/ms-qr1-ollama-bridge.sh").read_text()
-install = text.index('run_privileged install -m 0644 "$unit_tmp" "$UNIT_PATH"')
+copy_bridge = text.index('run_privileged install -m 0755 "$INSTALL_DIR/scripts/ms-qr1-ollama-bridge.sh" "$INSTALLED_BRIDGE"')
+copy_proxy = text.index('run_privileged install -m 0755 "$SOURCE_PROXY_SCRIPT" "$INSTALLED_PROXY"', copy_bridge)
+copy_compose = text.index('run_privileged install -m 0755 "$SOURCE_COMPOSE_FLAGS" "$INSTALLED_COMPOSE_FLAGS"', copy_proxy)
+install = text.index('run_privileged install -m 0644 "$unit_tmp" "$UNIT_PATH"', copy_compose)
 reload = text.index('run_privileged systemctl daemon-reload', install)
 restart = text.index('run_privileged systemctl restart "$SERVICE_NAME"', reload)
-if not install < reload < restart:
-    raise SystemExit("Ollama bridge install path must reload and restart after unit replacement")
+if not copy_bridge < copy_proxy < copy_compose < install < reload < restart:
+    raise SystemExit("Ollama bridge install path must copy root-owned executables before unit reload/restart")
+if "--upstream 127.0.0.1:11434" not in text or "--upstream-host-header localhost:11434" not in text:
+    raise SystemExit("Ollama bridge must pin loopback upstream and rewritten Host header")
+if "--max-body-bytes" not in text or "--upstream-timeout" not in text:
+    raise SystemExit("Ollama bridge must expose bounded body and upstream timeout settings")
 PY
+
+MS_QR1_OLLAMA_UNIT_PATH="$tmpdir/ms-qr1-ollama-bridge.service" "${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh install > "$tmpdir/bridge.install"
+assert_contains "ExecStart=\"$bridge_libexec/ms-qr1-ollama-bridge.sh\" serve" "$tmpdir/ms-qr1-ollama-bridge.service"
+assert_not_contains "ExecStart=\"$PWD/scripts/ms-qr1-ollama-bridge.sh\" serve" "$tmpdir/ms-qr1-ollama-bridge.service"
+[[ -x "$bridge_libexec/ms-qr1-ollama-bridge.sh" ]] || {
+  echo "bridge install did not copy executable bridge script" >&2
+  exit 1
+}
+[[ -x "$bridge_libexec/ms-qr1-ollama-http-proxy.py" ]] || {
+  echo "bridge install did not copy executable proxy script" >&2
+  exit 1
+}
+[[ -x "$bridge_libexec/ms-qr1-compose-flags.sh" ]] || {
+  echo "bridge install did not copy executable compose flags helper" >&2
+  exit 1
+}
+python3 - "$bridge_libexec/ms-qr1-ollama-bridge.sh" "$bridge_libexec/ms-qr1-ollama-http-proxy.py" "$bridge_libexec/ms-qr1-compose-flags.sh" <<'PY'
+import os
+import stat
+import sys
+
+for path in sys.argv[1:]:
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    if mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise SystemExit(f"{path} is group/world writable: {mode:o}")
+PY
+assert_contains 'enable ms-qr1-ollama-bridge.service' "$tmpdir/systemctl.log"
+assert_contains 'restart ms-qr1-ollama-bridge.service' "$tmpdir/systemctl.log"
+printf '\n# checkout mutation after install\n' >> "$bridge_script"
+assert_contains "ExecStart=\"$bridge_libexec/ms-qr1-ollama-bridge.sh\" serve" "$tmpdir/ms-qr1-ollama-bridge.service"
+restore_bridge_script
+cmp -s "$bridge_script_original" "$bridge_script" || {
+  echo "bridge script was not restored byte-for-byte after mutation fixture" >&2
+  exit 1
+}
+cat > "$tmpdir/network-ods-network.json" <<'JSON'
+[
+  {
+    "Name": "ods-network",
+    "IPAM": {
+      "Config": [
+        {"Subnet": "172.30.0.0/16", "Gateway": "172.30.0.1"}
+      ]
+    }
+  }
+]
+JSON
+cat > "$tmpdir/ip-addr.txt" <<'EOF'
+7: br-a inet 172.30.0.1/16 brd 172.30.255.255 scope global br-a
+8: br-b inet 172.20.0.1/16 brd 172.20.255.255 scope global br-b
+EOF
+"${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh expected-listeners > "$tmpdir/bridge.listeners.drift"
+assert_contains '172.30.0.1' "$tmpdir/bridge.listeners.drift"
+assert_contains "ExecStart=\"$bridge_libexec/ms-qr1-ollama-bridge.sh\" serve" "$tmpdir/ms-qr1-ollama-bridge.service"
+MS_QR1_OLLAMA_UNIT_PATH="$tmpdir/ms-qr1-ollama-bridge.service" "${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh remove > "$tmpdir/bridge.remove"
+[[ ! -e "$tmpdir/ms-qr1-ollama-bridge.service" ]] || {
+  echo "bridge remove left unit residue" >&2
+  exit 1
+}
+[[ ! -e "$bridge_libexec/ms-qr1-ollama-bridge.sh" && ! -e "$bridge_libexec/ms-qr1-ollama-http-proxy.py" && ! -e "$bridge_libexec/ms-qr1-compose-flags.sh" ]] || {
+  echo "bridge remove left installed executable residue" >&2
+  exit 1
+}
+assert_contains 'disable --now ms-qr1-ollama-bridge.service' "$tmpdir/systemctl.log"
+assert_contains 'daemon-reload' "$tmpdir/systemctl.log"
+cat > "$tmpdir/network-ods-network.json" <<'JSON'
+[
+  {
+    "Name": "ods-network",
+    "IPAM": {
+      "Config": [
+        {"Subnet": "172.31.0.0/16", "Gateway": "172.31.0.1"}
+      ]
+    }
+  }
+]
+JSON
+cat > "$tmpdir/ip-addr.txt" <<'EOF'
+7: br-a inet 172.31.0.1/16 brd 172.31.255.255 scope global br-a
+8: br-b inet 172.20.0.1/16 brd 172.20.255.255 scope global br-b
+9: br-internal inet 172.29.0.1/16 brd 172.29.255.255 scope global br-internal
+EOF
+
+python3 scripts/ms-qr1-ollama-http-proxy.py --self-test
+
+fixture_uid="$(id -u)"
+fixture_gid="$(id -g)"
+fixture_data="$tmpdir/qr1-data"
+mkdir -p "$fixture_data/qdrant"
+printf 'keep me\n' > "$fixture_data/qdrant/sentinel"
+if FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh check > "$tmpdir/prestart-missing.out" 2> "$tmpdir/prestart-missing.err"; then
+  echo "pre-start check should fail before SOUL.md exists" >&2
+  exit 1
+fi
+assert_contains 'missing' "$tmpdir/prestart-missing.err"
+FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/prestart-provision.out"
+assert_contains 'QR1 pre-start provisioning complete' "$tmpdir/prestart-provision.out"
+[[ -f "$fixture_data/persona/SOUL.md" ]] || {
+  echo "pre-start provisioning did not create regular SOUL.md" >&2
+  exit 1
+}
+python3 - "$fixture_data/persona/SOUL.md" <<'PY'
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+if "About this ODS install" not in text:
+    raise SystemExit("generated SOUL.md missing installation context")
+PY
+[[ "$(cat "$fixture_data/qdrant/sentinel")" == "keep me" ]] || {
+  echo "pre-start provisioning touched unrelated data directory" >&2
+  exit 1
+}
+mkdir -p "$fixture_data/n8n/nested"
+printf 'persistent n8n data\n' > "$fixture_data/n8n/config"
+printf 'nested n8n data\n' > "$fixture_data/n8n/nested/blob"
+printf 'n8n executable\n' > "$fixture_data/n8n/nested/run.sh"
+chmod 777 "$fixture_data/n8n/nested"
+chmod 666 "$fixture_data/n8n/nested/blob"
+chmod 755 "$fixture_data/n8n/nested/run.sh"
+soul_hash_before="$(sha256sum "$fixture_data/persona/SOUL.md" | awk '{print $1}')"
+FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/prestart-rerun.out"
+[[ "$(cat "$fixture_data/n8n/config")" == "persistent n8n data" ]] || {
+  echo "pre-start provisioning destroyed existing n8n data" >&2
+  exit 1
+}
+python3 - "$fixture_data/n8n/nested" "$fixture_data/n8n/nested/blob" "$fixture_data/n8n/nested/run.sh" <<'PY'
+import os
+import stat
+import sys
+
+expected = {
+    sys.argv[1]: 0o700,
+    sys.argv[2]: 0o600,
+    sys.argv[3]: 0o700,
+}
+for path, mode in expected.items():
+    actual = stat.S_IMODE(os.stat(path).st_mode)
+    if actual != mode:
+        raise SystemExit(f"{path} mode {actual:o}, expected {mode:o}")
+PY
+printf 'runtime sqlite\n' > "$fixture_data/n8n/database.sqlite"
+mkdir -p "$fixture_data/n8n/binaryData"
+chmod 644 "$fixture_data/n8n/database.sqlite"
+chmod 755 "$fixture_data/n8n/binaryData"
+FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh check > "$tmpdir/check-runtime-modes.out"
+check_bad_n8n_tree() {
+  local label="$1" data_dir="$2" expected="$3"
+  if FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$data_dir" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh check > "$tmpdir/check-${label}.out" 2> "$tmpdir/check-${label}.err"; then
+    echo "pre-start check should fail for $label" >&2
+    exit 1
+  fi
+  assert_contains "$expected" "$tmpdir/check-${label}.err"
+}
+chmod 400 "$fixture_data/n8n/nested/blob"
+check_bad_n8n_tree "nested-unwritable" "$fixture_data" 'not owner-writable'
+chmod 666 "$fixture_data/n8n/nested/blob"
+check_bad_n8n_tree "nested-group-world-writable" "$fixture_data" 'group-writable'
+chmod 600 "$fixture_data/n8n/nested/blob"
+chmod 777 "$fixture_data/n8n/binaryData"
+check_bad_n8n_tree "nested-world-writable-dir" "$fixture_data" 'group-writable'
+chmod 755 "$fixture_data/n8n/binaryData"
+chmod 600 "$fixture_data/n8n/binaryData"
+check_bad_n8n_tree "runtime-dir-0600" "$fixture_data" 'not owner-searchable'
+chmod 200 "$fixture_data/n8n/binaryData"
+check_bad_n8n_tree "runtime-dir-0200" "$fixture_data" 'not owner-searchable'
+chmod 400 "$fixture_data/n8n/binaryData"
+check_bad_n8n_tree "runtime-dir-0400" "$fixture_data" 'not owner-writable'
+chmod 700 "$fixture_data/n8n/binaryData"
+FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh check > "$tmpdir/check-runtime-dir-0700.out"
+chmod 755 "$fixture_data/n8n/binaryData"
+FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh check > "$tmpdir/check-runtime-dir-0755.out"
+if FIXTURE_N8N_USER="1234:2345" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh check > "$tmpdir/check-nested-wrong-owner.out" 2> "$tmpdir/check-nested-wrong-owner.err"; then
+  echo "pre-start check should fail for nested wrong owner" >&2
+  exit 1
+fi
+assert_contains 'expected 1234:2345' "$tmpdir/check-nested-wrong-owner.err"
+ln -s "$tmpdir/outside-check-target" "$fixture_data/n8n/nested/bad-link"
+printf 'outside check target\n' > "$tmpdir/outside-check-target"
+check_bad_n8n_tree "nested-symlink" "$fixture_data" 'is a symlink'
+rm -f "$fixture_data/n8n/nested/bad-link"
+mkfifo "$fixture_data/n8n/nested/bad-fifo"
+check_bad_n8n_tree "nested-fifo" "$fixture_data" 'neither a directory nor a regular file'
+rm -f "$fixture_data/n8n/nested/bad-fifo"
+chmod_test_data="$tmpdir/chmod-notimplemented-data"
+mkdir -p "$chmod_test_data/n8n"
+printf 'chmod fixture\n' > "$chmod_test_data/n8n/config"
+chmod 666 "$chmod_test_data/n8n/config"
+if MS_QR1_TEST_CHMOD_NO_FOLLOW_UNSUPPORTED=1 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$chmod_test_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/prestart-chmod-notimplemented.out" 2> "$tmpdir/prestart-chmod-notimplemented.err"; then
+  echo "pre-start provisioning should fail clearly when follow_symlinks chmod is unsupported" >&2
+  exit 1
+fi
+assert_contains 'cannot chmod' "$tmpdir/prestart-chmod-notimplemented.err"
+assert_contains 'without following symlinks' "$tmpdir/prestart-chmod-notimplemented.err"
+persona_check_external_dir="$tmpdir/persona-check-external-dir"
+mkdir -p "$persona_check_external_dir"
+printf 'persona check dir target\n' > "$persona_check_external_dir/sentinel"
+persona_dir_before="$(snapshot_path "$persona_check_external_dir")"
+mv "$fixture_data/persona" "$fixture_data/persona.real"
+ln -s "$persona_check_external_dir" "$fixture_data/persona"
+if FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh check > "$tmpdir/check-persona-dir-symlink.out" 2> "$tmpdir/check-persona-dir-symlink.err"; then
+  echo "pre-start check should fail when data/persona is a symlink" >&2
+  exit 1
+fi
+assert_contains 'data/persona is a symlink' "$tmpdir/check-persona-dir-symlink.err"
+[[ "$persona_dir_before" == "$(snapshot_path "$persona_check_external_dir")" ]] || {
+  echo "external persona directory target changed during check" >&2
+  exit 1
+}
+rm -f "$fixture_data/persona"
+mv "$fixture_data/persona.real" "$fixture_data/persona"
+persona_check_external_file="$tmpdir/persona-check-external-soul"
+printf 'persona check soul target\n' > "$persona_check_external_file"
+persona_file_before="$(snapshot_path "$persona_check_external_file")"
+mv "$fixture_data/persona/SOUL.md" "$fixture_data/persona/SOUL.md.real"
+ln -s "$persona_check_external_file" "$fixture_data/persona/SOUL.md"
+if FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh check > "$tmpdir/check-soul-symlink.out" 2> "$tmpdir/check-soul-symlink.err"; then
+  echo "pre-start check should fail when SOUL.md is a symlink" >&2
+  exit 1
+fi
+assert_contains 'SOUL.md is a symlink' "$tmpdir/check-soul-symlink.err"
+[[ "$persona_file_before" == "$(snapshot_path "$persona_check_external_file")" ]] || {
+  echo "external SOUL.md target changed during check" >&2
+  exit 1
+}
+rm -f "$fixture_data/persona/SOUL.md"
+mv "$fixture_data/persona/SOUL.md.real" "$fixture_data/persona/SOUL.md"
+soul_hash_after="$(sha256sum "$fixture_data/persona/SOUL.md" | awk '{print $1}')"
+[[ "$soul_hash_before" == "$soul_hash_after" ]] || {
+  echo "pre-start provisioning was not idempotent for unchanged SOUL.md" >&2
+  exit 1
+}
+assert_symlink_provision_fails_closed() {
+  local label="$1" target="$2" link_rel="$3"
+  local data_dir="$tmpdir/symlink-${label}-data"
+  mkdir -p "$data_dir/n8n/$(dirname "$link_rel")"
+  local before after
+  before="$(snapshot_path "$target")"
+  ln -s "$target" "$data_dir/n8n/$link_rel"
+  if FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$data_dir" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/symlink-${label}.out" 2> "$tmpdir/symlink-${label}.err"; then
+    echo "pre-start provisioning should fail closed for $label symlink" >&2
+    exit 1
+  fi
+  assert_contains 'is a symlink' "$tmpdir/symlink-${label}.err"
+  after="$(snapshot_path "$target")"
+  [[ "$before" == "$after" ]] || {
+    echo "external symlink target changed for $label" >&2
+    echo "before: $before" >&2
+    echo "after:  $after" >&2
+    exit 1
+  }
+}
+external_file="$tmpdir/external-file-target"
+printf 'external file target\n' > "$external_file"
+chmod 666 "$external_file"
+assert_symlink_provision_fails_closed "external-file" "$external_file" "file-link"
+external_dir="$tmpdir/external-dir-target"
+mkdir -p "$external_dir"
+printf 'external dir target\n' > "$external_dir/sentinel"
+chmod 777 "$external_dir"
+chmod 666 "$external_dir/sentinel"
+assert_symlink_provision_fails_closed "external-dir" "$external_dir" "dir-link"
+host_like_target="$tmpdir/root-owned-host-like-target"
+printf 'host-like target\n' > "$host_like_target"
+chmod 444 "$host_like_target"
+if [[ "$(id -u)" -eq 0 ]]; then
+  chown 0:0 "$host_like_target"
+fi
+assert_symlink_provision_fails_closed "host-like" "$host_like_target" "host-like-link"
+nested_target="$tmpdir/nested-external-target"
+printf 'nested external target\n' > "$nested_target"
+chmod 666 "$nested_target"
+assert_symlink_provision_fails_closed "nested" "$nested_target" "nested/link"
+assert_n8n_race_fails_closed() {
+  local label="$1" mode="$2" target="$3"
+  local data_dir="$tmpdir/n8n-race-${label}-data"
+  mkdir -p "$data_dir/n8n/nested"
+  printf 'race blob\n' > "$data_dir/n8n/nested/blob"
+  chmod 777 "$data_dir/n8n/nested"
+  chmod 666 "$data_dir/n8n/nested/blob"
+  local before after
+  before="$(snapshot_path "$target")"
+  if MS_QR1_TEST_N8N_RACE="$mode" MS_QR1_TEST_N8N_RACE_EXTERNAL="$target" FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$data_dir" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/n8n-race-${label}.out" 2> "$tmpdir/n8n-race-${label}.err"; then
+    echo "n8n race fixture should fail closed for $label" >&2
+    exit 1
+  fi
+  if ! grep -E 'changed during traversal|is a symlink' "$tmpdir/n8n-race-${label}.err" >/dev/null; then
+    echo "n8n race fixture did not report symlink/traversal failure for $label" >&2
+    cat "$tmpdir/n8n-race-${label}.err" >&2
+    exit 1
+  fi
+  after="$(snapshot_path "$target")"
+  [[ "$before" == "$after" ]] || {
+    echo "external n8n race target changed for $label" >&2
+    echo "before: $before" >&2
+    echo "after:  $after" >&2
+    exit 1
+  }
+}
+race_parent_external="$tmpdir/n8n-race-parent-external"
+mkdir -p "$race_parent_external"
+printf 'external parent race target\n' > "$race_parent_external/sentinel"
+chmod 777 "$race_parent_external"
+chmod 666 "$race_parent_external/sentinel"
+assert_n8n_race_fails_closed "parent-swap" "parent-swap" "$race_parent_external"
+race_final_external="$tmpdir/n8n-race-final-external"
+printf 'external final race target\n' > "$race_final_external"
+chmod 666 "$race_final_external"
+assert_n8n_race_fails_closed "final-swap" "final-swap" "$race_final_external"
+race_insert_external="$tmpdir/n8n-race-insert-external"
+printf 'external insert race target\n' > "$race_insert_external"
+chmod 666 "$race_insert_external"
+assert_n8n_race_fails_closed "symlink-insert" "symlink-insert" "$race_insert_external"
+assert_persona_symlink_fails_closed() {
+  local label="$1" target="$2" link_kind="$3"
+  local data_dir="$tmpdir/persona-symlink-${label}-data"
+  mkdir -p "$data_dir"
+  if [[ "$link_kind" == "persona-dir" ]]; then
+    ln -s "$target" "$data_dir/persona"
+  else
+    mkdir -p "$data_dir/persona"
+    ln -s "$target" "$data_dir/persona/SOUL.md"
+  fi
+  local before after
+  before="$(snapshot_path "$target")"
+  if FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$data_dir" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/persona-symlink-${label}.out" 2> "$tmpdir/persona-symlink-${label}.err"; then
+    echo "pre-start provisioning should fail closed for persona symlink $label" >&2
+    exit 1
+  fi
+  assert_contains 'is a symlink' "$tmpdir/persona-symlink-${label}.err"
+  after="$(snapshot_path "$target")"
+  [[ "$before" == "$after" ]] || {
+    echo "external persona symlink target changed for $label" >&2
+    echo "before: $before" >&2
+    echo "after:  $after" >&2
+    exit 1
+  }
+}
+persona_external_dir="$tmpdir/persona-external-dir-target"
+mkdir -p "$persona_external_dir"
+printf 'persona dir target\n' > "$persona_external_dir/sentinel"
+chmod 777 "$persona_external_dir"
+chmod 666 "$persona_external_dir/sentinel"
+assert_persona_symlink_fails_closed "persona-dir" "$persona_external_dir" "persona-dir"
+persona_external_file="$tmpdir/persona-soul-external-file"
+printf 'persona soul target\n' > "$persona_external_file"
+chmod 666 "$persona_external_file"
+assert_persona_symlink_fails_closed "soul-file" "$persona_external_file" "soul-file"
+persona_host_like="$tmpdir/persona-host-like-target"
+printf 'persona host-like target\n' > "$persona_host_like"
+chmod 444 "$persona_host_like"
+if [[ "$(id -u)" -eq 0 ]]; then
+  chown 0:0 "$persona_host_like"
+fi
+assert_persona_symlink_fails_closed "host-like" "$persona_host_like" "soul-file"
+persona_nested_dir="$tmpdir/persona-nested-host-like-dir"
+mkdir -p "$persona_nested_dir/nested"
+printf 'nested persona target\n' > "$persona_nested_dir/nested/SOUL.md"
+chmod 755 "$persona_nested_dir" "$persona_nested_dir/nested"
+chmod 444 "$persona_nested_dir/nested/SOUL.md"
+assert_persona_symlink_fails_closed "nested-host-like" "$persona_nested_dir/nested/SOUL.md" "soul-file"
+assert_persona_race_no_escape() {
+  local label="$1" mode="$2" target="$3"
+  local data_dir="$tmpdir/persona-race-${label}-data"
+  mkdir -p "$data_dir"
+  local before after rc
+  before="$(snapshot_path "$target")"
+  rc=0
+  MS_QR1_TEST_PERSONA_RACE="$mode" MS_QR1_TEST_PERSONA_RACE_EXTERNAL="$target" FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$data_dir" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/persona-race-${label}.out" 2> "$tmpdir/persona-race-${label}.err" || rc=$?
+  after="$(snapshot_path "$target")"
+  [[ "$before" == "$after" ]] || {
+    echo "external persona race target changed for $label" >&2
+    echo "before: $before" >&2
+    echo "after:  $after" >&2
+    exit 1
+  }
+  if [[ "$mode" == "soul-symlink" ]]; then
+    [[ "$rc" -eq 0 ]] || {
+      echo "SOUL.md symlink race should install into the trusted persona directory without escaping" >&2
+      cat "$tmpdir/persona-race-${label}.err" >&2
+      exit 1
+    }
+    [[ -f "$data_dir/persona/SOUL.md" && ! -L "$data_dir/persona/SOUL.md" ]] || {
+      echo "SOUL.md symlink race did not leave a regular persona file" >&2
+      exit 1
+    }
+  else
+    [[ "$rc" -ne 0 ]] || {
+      echo "persona directory swap should fail the final provisioning gate" >&2
+      exit 1
+    }
+    assert_contains 'is a symlink' "$tmpdir/persona-race-${label}.err"
+  fi
+}
+persona_race_file="$tmpdir/persona-race-external-file"
+printf 'persona race external file\n' > "$persona_race_file"
+chmod 666 "$persona_race_file"
+assert_persona_race_no_escape "soul-symlink" "soul-symlink" "$persona_race_file"
+persona_race_dir="$tmpdir/persona-race-external-dir"
+mkdir -p "$persona_race_dir"
+printf 'persona race external dir\n' > "$persona_race_dir/sentinel"
+chmod 777 "$persona_race_dir"
+chmod 666 "$persona_race_dir/sentinel"
+assert_persona_race_no_escape "persona-dir-swap" "persona-dir-swap" "$persona_race_dir"
+FIXTURE_N8N_USER="1234:2345" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh n8n-user > "$tmpdir/prestart-n8n-user.out"
+assert_contains '1234:2345' "$tmpdir/prestart-n8n-user.out"
+nonroot_mismatch_data="$tmpdir/nonroot-mismatch-data"
+mkdir -p "$nonroot_mismatch_data/persona" "$nonroot_mismatch_data/n8n"
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo "Skipping non-root escalation assertion because test runner EUID is 0" > "$tmpdir/prestart-nonroot-mismatch.skip"
+else
+  if FIXTURE_N8N_USER="1234:2345" MS_QR1_DATA_DIR="$nonroot_mismatch_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/prestart-nonroot-mismatch.out" 2> "$tmpdir/prestart-nonroot-mismatch.err"; then
+    echo "pre-start provisioning should not silently escalate for non-default n8n ownership" >&2
+    exit 1
+  fi
+  assert_contains 'Rerun this specific QR1 provisioning step with sudo' "$tmpdir/prestart-nonroot-mismatch.err"
+fi
+python3 - "$tmpdir/compose-config.json" "$tmpdir/compose-without-n8n.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text().replace("__N8N_USER__", "1000:1000"))
+data["services"].pop("n8n", None)
+Path(sys.argv[2]).write_text(json.dumps(data))
+PY
+FIXTURE_COMPOSE_CONFIG="$tmpdir/compose-without-n8n.json" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh n8n-user > "$tmpdir/prestart-no-n8n-user.out"
+[[ ! -s "$tmpdir/prestart-no-n8n-user.out" ]] || {
+  echo "n8n-user should print nothing when n8n is absent" >&2
+  cat "$tmpdir/prestart-no-n8n-user.out" >&2
+  exit 1
+}
+FIXTURE_COMPOSE_CONFIG="$tmpdir/compose-without-n8n.json" MS_QR1_DATA_DIR="$tmpdir/no-n8n-data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/prestart-no-n8n.out"
+assert_contains 'skipping data/n8n provisioning' "$tmpdir/prestart-no-n8n.out"
+[[ ! -e "$tmpdir/no-n8n-data/n8n" ]] || {
+  echo "pre-start provisioning should not create data/n8n when n8n is absent" >&2
+  exit 1
+}
+DOCKER_PS_HAS_HERMES=1 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-refresh.out"
+assert_contains 'exec ods-hermes cp /opt/hermes/docker/SOUL.md /opt/data/SOUL.md' "$tmpdir/docker-exec.log"
+if DOCKER_PS_FAIL=1 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-docker-fail.out" 2> "$tmpdir/poststart-docker-fail.err"; then
+  echo "poststart-refresh should fail when docker ps fails" >&2
+  exit 1
+fi
+assert_contains 'fixture docker ps failure' "$tmpdir/poststart-docker-fail.err"
+if FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-hermes-absent.out" 2> "$tmpdir/poststart-hermes-absent.err"; then
+  echo "poststart-refresh should fail when ods-hermes is absent" >&2
+  exit 1
+fi
+assert_contains 'ods-hermes is not running' "$tmpdir/poststart-hermes-absent.err"
+if DOCKER_PS_STOPPED_HERMES=1 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-hermes-stopped.out" 2> "$tmpdir/poststart-hermes-stopped.err"; then
+  echo "poststart-refresh should fail when ods-hermes is stopped" >&2
+  exit 1
+fi
+assert_contains 'ods-hermes is not running' "$tmpdir/poststart-hermes-stopped.err"
+if DOCKER_PS_HAS_HERMES=1 DOCKER_EXEC_FAIL=1 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-exec-fail.out" 2> "$tmpdir/poststart-exec-fail.err"; then
+  echo "poststart-refresh should fail when docker exec copy fails" >&2
+  exit 1
+fi
+assert_contains 'fixture docker exec failure' "$tmpdir/poststart-exec-fail.err"
+bad_soul_data="$tmpdir/bad-soul-data"
+mkdir -p "$bad_soul_data/persona/SOUL.md"
+if FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$bad_soul_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/prestart-bad-soul.out" 2> "$tmpdir/prestart-bad-soul.err"; then
+  echo "pre-start provisioning should fail safely when SOUL.md is a directory" >&2
+  exit 1
+fi
+assert_contains 'SOUL.md is a directory' "$tmpdir/prestart-bad-soul.err"
+
+cat > "$tmpdir/ss-state.txt" <<'EOF'
+State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
+LISTEN 0      4096   127.0.0.1:11434     0.0.0.0:*         users:(("ollama",pid=10,fd=3))
+LISTEN 0      4096   172.31.0.1:11434    0.0.0.0:*         users:(("python3",pid=11,fd=3))
+LISTEN 0      4096   172.20.0.1:11434    0.0.0.0:*         users:(("python3",pid=12,fd=3))
+LISTEN 0      4096   172.31.0.1:7710     0.0.0.0:*         users:(("python3",pid=13,fd=3))
+LISTEN 0      4096   127.0.0.1:4000      0.0.0.0:*         users:(("docker-proxy",pid=14,fd=3))
+EOF
+"${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
+if SS_FAIL=1 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-fail.out" 2> "$tmpdir/ss-fail.err"; then
+  echo "listener acceptance should fail when ss fails" >&2
+  exit 1
+fi
+assert_contains 'ss listener snapshot failed' "$tmpdir/ss-fail.err"
+cat > "$tmpdir/ss-state.txt" <<'EOF'
+State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
+LISTEN 0      4096   127.0.0.1:11434     0.0.0.0:*         users:(("ollama",pid=10,fd=3))
+LISTEN 0      4096   192.168.50.1:11434  0.0.0.0:*         users:(("python3",pid=11,fd=3))
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-bad.out" 2> "$tmpdir/ss-bad.err"; then
+  echo "listener acceptance should fail on non-gateway Ollama bridge binds" >&2
+  exit 1
+fi
+assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-bad.out"
 
 cat > "$tmpdir/curl" <<'SH'
 #!/usr/bin/env bash
@@ -309,10 +920,12 @@ fi
 for f in \
   scripts/ms-qr1-compose-flags.sh \
   scripts/ms-qr1-ufw-docker-rules.sh \
+  scripts/ms-qr1-prestart-provision.sh \
   scripts/ms-qr1-ollama-bridge.sh \
   scripts/ms-qr1-acceptance.sh; do
   bash -n "$f"
 done
+PYTHONPYCACHEPREFIX="$tmpdir/pycache" python3 -m py_compile scripts/ms-qr1-ollama-http-proxy.py
 
 cat > "$tmpdir/bad.sh" <<'SH'
 if [[ -z "$x" && command -v docker ]]; then
@@ -337,12 +950,18 @@ assert_contains 'json.loads(os.environ["COMPOSE_JSON"])' scripts/ms-qr1-acceptan
 assert_contains 'check_rendered_published_ports_loopback' scripts/ms-qr1-acceptance.sh
 assert_contains 'check_rendered_services_policy' scripts/ms-qr1-acceptance.sh
 assert_contains 'check_ms_qr1_host_aliases' scripts/ms-qr1-acceptance.sh
+assert_contains 'check_prestart_provisioning' scripts/ms-qr1-acceptance.sh
 assert_contains 'check_live_listeners_loopback_and_bridge_no_wildcard' scripts/ms-qr1-acceptance.sh
+assert_contains 'scripts/ms-qr1-ollama-bridge.sh expected-listeners' scripts/ms-qr1-acceptance.sh
+assert_contains 'non-gateway QR1 Ollama bridge bind' scripts/ms-qr1-acceptance.sh
 assert_contains 'services=("litellm" "${services[@]}")' scripts/ms-qr1-acceptance.sh
 assert_contains 'SDXL_REVISION=c6c10e8716de60c7ef4eed6b89a06f67e772b374' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'SDXL_SHA256=e0d996ee0013e79d9d3561f50fcafb9a17e3ff07b780358e3b66d67932c4d490' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'sha256sum -c -' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --no-start' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'scripts/ms-qr1-prestart-provision.sh' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'sudo scripts/ms-qr1-prestart-provision.sh' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'scripts/ms-qr1-prestart-provision.sh poststart-refresh' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --force-recreate' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_not_contains 'docker network create ods-network' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'sudo systemctl restart ods-host-agent.service' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
@@ -350,6 +969,17 @@ assert_contains 'sudo apt-get install -y python3-yaml jq' ../docs/ms/deploy/QR1-
 assert_contains 'jq --version' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'jq is required for schema validation' scripts/validate-env.sh
 assert_contains "^[A-Za-z_][A-Za-z0-9_]*=.*(CHANGEME|GENERATE_ME)" ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_not_contains 'sudo "$@"' scripts/ms-qr1-prestart-provision.sh
+assert_not_contains 'run_privileged' scripts/ms-qr1-prestart-provision.sh
+python3 - <<'PY'
+from pathlib import Path
+
+text = Path("../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md").read_text()
+prestart = text.index("scripts/ms-qr1-prestart-provision.sh")
+network_create = text.index("up -d --build --no-start")
+if not prestart < network_create:
+    raise SystemExit("QR1 pre-start provisioning must be documented before Compose --no-start")
+PY
 
 COMPOSE_JSON="$(cat "$tmpdir/compose-config.json")" python3 - <<'PY'
 import json
@@ -479,6 +1109,11 @@ then
 fi
 [[ ! -e "$checkpoint_final" ]] || {
   echo "corrupt ComfyUI checkpoint fixture was promoted" >&2
+  exit 1
+}
+
+cmp -s "$bridge_script_original" "$bridge_script" || {
+  echo "bridge script differs from its pre-test bytes" >&2
   exit 1
 }
 

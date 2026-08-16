@@ -5,27 +5,37 @@ usage() {
   cat <<'USAGE'
 Usage:
   scripts/ms-qr1-ollama-bridge.sh plan
+  scripts/ms-qr1-ollama-bridge.sh expected-listeners
   scripts/ms-qr1-ollama-bridge.sh render-unit
   scripts/ms-qr1-ollama-bridge.sh install
   scripts/ms-qr1-ollama-bridge.sh remove
+  scripts/ms-qr1-ollama-bridge.sh serve
   scripts/ms-qr1-ollama-bridge.sh status
 
 Installs a narrow host-side bridge for QR1 containers:
   non-internal ODS Docker gateway IP(s):11434 -> 127.0.0.1:11434
 
-It does not change Ollama's listener and never binds Ollama or socat to
-0.0.0.0. Run from the ods/ directory after QR1 Docker networks exist.
+It does not change Ollama's listener, never binds to 0.0.0.0, and rewrites the
+upstream HTTP Host header to localhost:11434. Run from the ods/ directory after
+QR1 Docker networks exist.
 USAGE
 }
 
 ACTION="${1:-plan}"
 case "$ACTION" in
-  plan|render-unit|install|remove|status) ;;
+  plan|expected-listeners|render-unit|install|remove|serve|status) ;;
   *) usage >&2; exit 2 ;;
 esac
 
 SERVICE_NAME="ms-qr1-ollama-bridge.service"
 UNIT_PATH="${MS_QR1_OLLAMA_UNIT_PATH:-/etc/systemd/system/$SERVICE_NAME}"
+INSTALL_DIR="$(pwd)"
+LIBEXEC_DIR="${MS_QR1_OLLAMA_LIBEXEC_DIR:-/usr/local/libexec/ms-qr1}"
+INSTALLED_BRIDGE="$LIBEXEC_DIR/ms-qr1-ollama-bridge.sh"
+INSTALLED_PROXY="$LIBEXEC_DIR/ms-qr1-ollama-http-proxy.py"
+INSTALLED_COMPOSE_FLAGS="$LIBEXEC_DIR/ms-qr1-compose-flags.sh"
+SOURCE_PROXY_SCRIPT="$INSTALL_DIR/scripts/ms-qr1-ollama-http-proxy.py"
+SOURCE_COMPOSE_FLAGS="$INSTALL_DIR/scripts/ms-qr1-compose-flags.sh"
 
 require() {
   command -v "$1" >/dev/null || { echo "ERROR: $1 is required" >&2; exit 1; }
@@ -39,12 +49,22 @@ run_privileged() {
   fi
 }
 
+systemd_quote() {
+  python3 - "$1" <<'PY'
+import sys
+value = sys.argv[1].replace("\\", "\\\\").replace('"', '\\"')
+print(f'"{value}"')
+PY
+}
+
 if [[ "$ACTION" == "remove" ]]; then
   require systemctl
   if ! run_privileged systemctl disable --now "$SERVICE_NAME"; then
     echo "WARNING: $SERVICE_NAME was not active or could not be disabled" >&2
   fi
   run_privileged rm -f "$UNIT_PATH"
+  run_privileged rm -f "$INSTALLED_BRIDGE" "$INSTALLED_PROXY" "$INSTALLED_COMPOSE_FLAGS"
+  run_privileged rmdir "$LIBEXEC_DIR" 2>/dev/null || true
   run_privileged systemctl daemon-reload
   echo "Removed $SERVICE_NAME"
   exit 0
@@ -60,13 +80,19 @@ require docker
 require python3
 require ip
 
-if [[ ! -x scripts/ms-qr1-compose-flags.sh ]]; then
+if [[ -x "$INSTALLED_COMPOSE_FLAGS" ]]; then
+  COMPOSE_FLAGS_SCRIPT="$INSTALLED_COMPOSE_FLAGS"
+else
+  COMPOSE_FLAGS_SCRIPT="$SOURCE_COMPOSE_FLAGS"
+fi
+
+if [[ ! -x "$COMPOSE_FLAGS_SCRIPT" ]]; then
   echo "ERROR: run from the ods/ directory" >&2
   exit 1
 fi
 
 mapfile -t network_names < <(
-  docker compose $(scripts/ms-qr1-compose-flags.sh) config --format json \
+  docker compose $("$COMPOSE_FLAGS_SCRIPT") config --format json \
     | python3 -c '
 import json, sys
 data = json.load(sys.stdin)
@@ -152,18 +178,41 @@ if ! printf '%s\n' "${valid_gateways[@]}" | grep -Fx "$ods_network_gateway" >/de
 fi
 
 addr_list="$(printf '%s\n' "${valid_gateways[@]}" | paste -sd ' ' -)"
+proxy_args=()
+for gateway in "${valid_gateways[@]}"; do
+  proxy_args+=(--listen-addr "$gateway")
+done
+
+if [[ "$ACTION" == "serve" ]]; then
+  [[ -f "$INSTALLED_PROXY" ]] || { echo "ERROR: missing $INSTALLED_PROXY" >&2; exit 1; }
+  exec python3 "$INSTALLED_PROXY" "${proxy_args[@]}" \
+    --listen-port 11434 \
+    --upstream 127.0.0.1:11434 \
+    --upstream-host-header localhost:11434 \
+    --max-body-bytes "${MS_QR1_OLLAMA_MAX_BODY_BYTES:-268435456}" \
+    --upstream-timeout "${MS_QR1_OLLAMA_UPSTREAM_TIMEOUT:-300}"
+fi
 
 render_unit() {
+  local quoted_install_dir quoted_exec
+  quoted_install_dir="$(systemd_quote "$INSTALL_DIR")"
+  quoted_exec="$(systemd_quote "$INSTALLED_BRIDGE")"
   cat <<UNIT
 [Unit]
-Description=MS QR1 Ollama Docker bridge
+Description=MS QR1 Ollama Docker HTTP bridge
 After=docker.service ollama.service
 Wants=docker.service
 
 [Service]
 Type=simple
-Environment="MS_QR1_OLLAMA_BRIDGE_ADDRS=$addr_list"
-ExecStart=/bin/sh -c 'if [ -z "\$\$MS_QR1_OLLAMA_BRIDGE_ADDRS" ]; then exit 64; fi; for addr in \$\$MS_QR1_OLLAMA_BRIDGE_ADDRS; do if [ -z "\$\$addr" ]; then exit 64; fi; socat TCP-LISTEN:11434,bind=\$\$addr,reuseaddr,fork TCP:127.0.0.1:11434 & done; wait'
+WorkingDirectory=$quoted_install_dir
+ExecStart=$quoted_exec serve
+Environment="MS_QR1_OLLAMA_MAX_BODY_BYTES=268435456"
+Environment="MS_QR1_OLLAMA_UPSTREAM_TIMEOUT=300"
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/tmp /var/tmp
 Restart=on-failure
 RestartSec=5
 
@@ -176,11 +225,17 @@ echo "QR1 Ollama bridge target: 127.0.0.1:11434" >&2
 echo "QR1 non-internal Docker gateway listener(s):" >&2
 printf '  %s:11434\n' "${valid_gateways[@]}" >&2
 
+if [[ "$ACTION" == "expected-listeners" ]]; then
+  printf '%s\n' "${valid_gateways[@]}"
+  exit 0
+fi
+
 if [[ "$ACTION" == "plan" ]]; then
   echo "Set in .env before final compose render:"
   printf 'MS_QR1_HOST_GATEWAY=%s\n' "$ods_network_gateway"
   echo
-  echo "Would install $SERVICE_NAME using socat. No Ollama bind change is required."
+  echo "Would install $SERVICE_NAME using the QR1 HTTP proxy. No Ollama bind change is required."
+  echo "Proxy rewrites upstream Host to localhost:11434 and forwards only to 127.0.0.1:11434."
   exit 0
 fi
 
@@ -189,11 +244,17 @@ if [[ "$ACTION" == "render-unit" ]]; then
   exit 0
 fi
 
-require socat
 require systemctl
+[[ -f "$SOURCE_PROXY_SCRIPT" ]] || { echo "ERROR: missing $SOURCE_PROXY_SCRIPT" >&2; exit 1; }
+[[ -f "$INSTALL_DIR/scripts/ms-qr1-ollama-bridge.sh" ]] || { echo "ERROR: missing $INSTALL_DIR/scripts/ms-qr1-ollama-bridge.sh" >&2; exit 1; }
+[[ -f "$SOURCE_COMPOSE_FLAGS" ]] || { echo "ERROR: missing $SOURCE_COMPOSE_FLAGS" >&2; exit 1; }
 
 unit_tmp="$(mktemp "${TMPDIR:-/tmp}/ms-qr1-ollama-bridge.XXXXXX")"
 render_unit > "$unit_tmp"
+run_privileged install -d -m 0755 "$LIBEXEC_DIR"
+run_privileged install -m 0755 "$INSTALL_DIR/scripts/ms-qr1-ollama-bridge.sh" "$INSTALLED_BRIDGE"
+run_privileged install -m 0755 "$SOURCE_PROXY_SCRIPT" "$INSTALLED_PROXY"
+run_privileged install -m 0755 "$SOURCE_COMPOSE_FLAGS" "$INSTALLED_COMPOSE_FLAGS"
 run_privileged install -m 0644 "$unit_tmp" "$UNIT_PATH"
 rm -f "$unit_tmp"
 run_privileged systemctl daemon-reload

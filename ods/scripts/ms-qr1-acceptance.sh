@@ -168,7 +168,21 @@ PY
 
 check_live_listeners_loopback_and_bridge_no_wildcard() {
   require ss
-  ss -tlnp | awk '
+  local expected_bridge_addrs listener_snapshot
+  expected_bridge_addrs="$(scripts/ms-qr1-ollama-bridge.sh expected-listeners)"
+  listener_snapshot="$(ss -tlnp)" || {
+    echo "ss listener snapshot failed" >&2
+    return 1
+  }
+  EXPECTED_BRIDGE_ADDRS="$expected_bridge_addrs" awk '
+    BEGIN {
+      split(ENVIRON["EXPECTED_BRIDGE_ADDRS"], expected, "\n")
+      for (idx in expected) {
+        if (expected[idx] != "") {
+          bridge_addr[expected[idx]]=1
+        }
+      }
+    }
     /:(3000|3001|3002|3004|3005|3006|4000|5678|6333|6334|7890|8085|8090|8188|8880|8888|9000|9120) / {
       if ($4 !~ /^127\.0\.0\.1:/ && $4 !~ /^\[::1\]:/) {
         print "non-loopback QR1 service bind: " $0
@@ -181,8 +195,16 @@ check_live_listeners_loopback_and_bridge_no_wildcard() {
         bad=1
       }
     }
+    /:11434 / {
+      addr=$4
+      sub(/:[0-9]+$/, "", addr)
+      if (addr != "127.0.0.1" && !(addr in bridge_addr)) {
+        print "non-gateway QR1 Ollama bridge bind: " $0
+        bad=1
+      }
+    }
     END { exit bad ? 1 : 0 }
-  '
+  ' <<<"$listener_snapshot"
 }
 
 check_hermes_tui() {
@@ -201,6 +223,10 @@ check_qdrant_auth() {
 check_no_placeholders() {
   [[ -f "$ENV_FILE" ]] || { echo "$ENV_FILE not found" >&2; return 1; }
   ! grep -nE '^[A-Za-z_][A-Za-z0-9_]*=.*(CHANGEME|GENERATE_ME)' "$ENV_FILE"
+}
+
+check_prestart_provisioning() {
+  scripts/ms-qr1-prestart-provision.sh check
 }
 
 check_model_identity() {
@@ -352,6 +378,7 @@ main() {
   check "Hermes TUI/9119 disabled" check_hermes_tui
   check "Qdrant rejects unauthenticated requests" check_qdrant_auth
   check "rendered env/config contains no placeholders" check_no_placeholders
+  check "QR1 pre-start bind mounts are provisioned" check_prestart_provisioning
   check "Ollama model identity matches EXPECTED_MODEL" check_model_identity
   check "containers reach host Ollama through ms-qr1-host" check_container_ollama_route
   check "Host-agent nmcli endpoints reject unauthenticated requests" check_host_agent_nmcli_boundary
