@@ -8,6 +8,103 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-16 — Close QR1 final re-review gaps
+
+### Change ID
+`MSODS-0007`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`feature/qr1-stack` / PR #6
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`CONFIGURE` + `EXTEND`
+
+### Files changed
+- `ods/docker-compose.ms-qr1.yml`
+- `ods/scripts/ms-qr1-ufw-docker-rules.sh`
+- `ods/scripts/ms-qr1-ollama-bridge.sh`
+- `ods/scripts/ms-qr1-acceptance.sh`
+- `ods/tests/test-ms-qr1-helpers.sh`
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Resolve final re-review findings against commit `74c1f8c9` before QR1 approval.
+
+### MS requirement / ADR
+QR1 C3/H2 closure; host-native Ollama through the actual ODS Docker gateway;
+machine-manageable UFW lifecycle; Ubuntu 24.04 deploy gates.
+
+### Behavior before
+Only three services had the `ms-qr1-host` alias, while `perplexica`,
+`privacy-shield`, and `token-spy` inherited environment values pointing at
+`ms-qr1-host`. UFW `remove` depended on currently discoverable Docker
+networks, so stale rules could remain after network teardown or subnet drift.
+The runbook hand-created `ods-network`, used `python` in gate commands, did
+not install `python3-yaml`, and did not restart host-agent after gateway
+recreation. The bridge plan emitted the first sorted gateway instead of the
+gateway for the rendered network named `ods-network`.
+
+### Behavior after
+Every rendered service whose environment references `ms-qr1-host` must also
+render an `extra_hosts` alias for it. UFW `remove` first deletes current
+discovered rules and then sweeps `MS QR1 docker-to-host` commented rules from
+`ufw status numbered` in descending numeric order, so cleanup still works
+after Docker network loss or CIDR drift. The runbook creates networks through
+Compose with `up --no-start`, force-recreates containers after the real
+gateway is set, removes UFW rules before Compose teardown, installs/verifies
+`python3-yaml`, uses `python3` for gates, and restarts host-agent after
+network recreation. The bridge helper publishes `MS_QR1_HOST_GATEWAY` from
+`ods-network` specifically and fails the systemd unit if its address list is
+empty. `model-router` remains explicitly allowed as an inert/internal core
+service; remote-provider egress and SSH tunnel remain excluded.
+
+### Security / privacy impact
+Positive. QR1 Docker-to-host access is more deterministic and has a safer
+rollback path. The change does not bind Ollama or `socat` to `0.0.0.0`, does
+not widen LAN/tailnet exposure, and adds no secrets.
+
+### Upgrade / upstream impact
+Low. Changes are QR1-owned compose override, helper scripts, tests and docs.
+No upstream ODS core runtime change is made.
+
+### Validation performed
+- `make lint`
+- `make test`
+- `bash tests/test-ms-qr1-helpers.sh`
+- individual `bash -n` on every new QR1 shell script
+- full QR1 Compose render
+- `python3 scripts/audit-extensions.py`
+- `bash tests/test-safe-env.sh`
+- `bash tests/test-secret-security.sh`
+- `python3 tests/contracts/test-network-exposure-contracts.py`
+- `git diff --check`
+- changed-file secret scan
+
+### Rollback
+Repository rollback: revert the MSODS-0007 correction commit.
+
+Host rollback if already deployed: run `sudo scripts/ms-qr1-ufw-docker-rules.sh
+remove` before `docker compose ... down`, then remove Tailscale serve mappings,
+the Ollama bridge, host-agent unit, and the filled `.env` per the latest
+runbook.
+
+### Notes
+The ComfyUI corrupt-checkpoint regression keeps static assertions for the
+pinned revision, SHA256, and `sha256sum -c -`, plus a fixture proving a corrupt
+`.part` file is not promoted. It does not execute the runbook's copied
+operator shell block directly because that block is documentation, not a
+reusable provisioning script.
+
+---
+
 ## 2026-08-16 — Harden QR1 final-review deployment boundary
 
 ### Change ID
@@ -101,10 +198,10 @@ made.
 - `bash tests/test-ms-qr1-helpers.sh`
 - individual `bash -n` on every new QR1 shell script
 - `docker compose --env-file profiles/ms-qr1.env.example $(./scripts/ms-qr1-compose-flags.sh) config`
-- `python scripts/audit-extensions.py`
+- `python3 scripts/audit-extensions.py`
 - `bash tests/test-safe-env.sh`
 - `bash tests/test-secret-security.sh`
-- `python tests/contracts/test-network-exposure-contracts.py`
+- `python3 tests/contracts/test-network-exposure-contracts.py`
 - `git diff --check`
 - changed-file secret scan
 

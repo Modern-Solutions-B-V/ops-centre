@@ -40,6 +40,8 @@ Install Docker Engine only if absent.
 
 ```bash
 docker version
+python3 --version
+python3 -c 'import yaml; print("python3-yaml available")'
 ```
 
 If missing, follow Docker's official Ubuntu/Debian Engine install procedure for the EVO-X3 OS release, then run:
@@ -51,9 +53,17 @@ docker network ls
 sudo ufw status numbered
 ```
 
-Expected: Docker client/server both report versions; UFW policy is unchanged except Docker's own chains.
+On a clean Ubuntu 24.04 host, install the Python YAML package before QR1 gates:
 
-Evidence: package install transcript, `docker version`, `docker network ls`, and `ufw status numbered`.
+```bash
+sudo apt-get update
+sudo apt-get install -y python3-yaml
+python3 -c 'import yaml; print("python3-yaml available")'
+```
+
+Expected: Docker client/server both report versions; `python3` exists; `import yaml` succeeds; UFW policy is unchanged except Docker's own chains.
+
+Evidence: package install transcript, `docker version`, `python3 --version`, Python YAML import output, `docker network ls`, and `ufw status numbered`.
 
 Rollback:
 
@@ -196,15 +206,11 @@ rm -f data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors*
 
 ## 7. Create QR1 Docker Network And Fill Gateway
 
-Create the non-internal ODS Docker network before final render. The internal Langfuse network is intentionally not granted host access.
+Create QR1 Docker networks through Compose before final render. Use a temporary gateway only for this no-start network/container creation step; section 11 force-recreates containers after the real gateway is written to `.env`. The internal Langfuse network is intentionally not granted host access.
 
 ```bash
-if docker network inspect ods-network >/tmp/qr1-ods-network.inspect.json; then
-  echo "ods-network already exists"
-else
-  docker network create ods-network
-fi
-scripts/ms-qr1-ollama-bridge.sh plan | tee /tmp/qr1-ollama-bridge.plan.txt
+MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --no-start
+MS_QR1_HOST_GATEWAY=127.0.0.1 scripts/ms-qr1-ollama-bridge.sh plan | tee /tmp/qr1-ollama-bridge.plan.txt
 MS_QR1_HOST_GATEWAY="$(awk -F= '$1 == "MS_QR1_HOST_GATEWAY" {print $2}' /tmp/qr1-ollama-bridge.plan.txt | tail -1)"
 test -n "$MS_QR1_HOST_GATEWAY"
 sed -i "s/^MS_QR1_HOST_GATEWAY=.*/MS_QR1_HOST_GATEWAY=${MS_QR1_HOST_GATEWAY}/" .env
@@ -212,18 +218,16 @@ grep -n '^MS_QR1_HOST_GATEWAY=' .env
 docker compose $(scripts/ms-qr1-compose-flags.sh) config > /tmp/qr1-compose.rendered.yml
 ```
 
-Expected: `MS_QR1_HOST_GATEWAY` is a private Docker gateway IP for `ods-network`; the rendered stack uses `ms-qr1-host:<gateway>` and does not use `host.docker.internal` for Ollama.
+Expected: Compose creates and labels QR1 networks consistently; `MS_QR1_HOST_GATEWAY` is the private Docker gateway IP for the rendered network named `ods-network`; the rendered stack uses `ms-qr1-host:<gateway>` and does not use `host.docker.internal` for Ollama.
 
-Evidence: `/tmp/qr1-ollama-bridge.plan.txt`, redacted `.env` line, and `/tmp/qr1-compose.rendered.yml`.
+Evidence: `docker compose ps -a`, `docker network inspect ods-network`, `/tmp/qr1-ollama-bridge.plan.txt`, redacted `.env` line, and `/tmp/qr1-compose.rendered.yml`.
 
 Rollback:
 
 ```bash
 sed -i 's/^MS_QR1_HOST_GATEWAY=.*/MS_QR1_HOST_GATEWAY=GENERATE_ME_DOCKER_GATEWAY/' .env
-docker network rm ods-network
+MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose $(scripts/ms-qr1-compose-flags.sh) down
 ```
-
-Only remove `ods-network` if no other ODS stack is using it.
 
 ## 8. Install Host-Agent Service
 
@@ -328,7 +332,7 @@ Expected rollback: no `MS QR1 docker-to-host` rules remain. Use the helper rathe
 ## 11. Start QR1 Stack
 
 ```bash
-docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build
+docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --force-recreate
 docker compose $(scripts/ms-qr1-compose-flags.sh) ps
 ```
 
@@ -339,18 +343,36 @@ Evidence: `docker compose ps`.
 Rollback:
 
 ```bash
+sudo scripts/ms-qr1-ufw-docker-rules.sh remove
 docker compose $(scripts/ms-qr1-compose-flags.sh) down
 ```
 
-If `docker compose down`, Docker network removal, or subnet reallocation occurs, rerun sections 7, 9, and 10 before starting QR1 again. The helpers intentionally rediscover current network gateways and rules rather than assuming a fixed Docker CIDR.
+If `docker compose down`, Docker network removal, or subnet reallocation occurs, rerun section 7, restart the host-agent, then rerun sections 9, 10, and 11:
+
+```bash
+sudo systemctl restart ods-host-agent.service
+systemctl status ods-host-agent.service --no-pager
+```
+
+The helpers intentionally rediscover current network gateways and rules rather than assuming a fixed Docker CIDR. The host-agent must restart because its Linux bind address is resolved once at service start.
 
 ## 12. Container-To-Host Inference Boundary
 
 ```bash
-docker compose $(scripts/ms-qr1-compose-flags.sh) exec -T litellm \
-  python3 -c 'import urllib.request; print(urllib.request.urlopen("http://ms-qr1-host:11434/api/tags", timeout=5).status)'
-docker compose $(scripts/ms-qr1-compose-flags.sh) exec -T dashboard-api \
-  python3 -c 'import urllib.request; print(urllib.request.urlopen("http://ms-qr1-host:11434/api/tags", timeout=5).status)'
+for service in litellm dashboard-api perplexica privacy-shield token-spy; do
+  docker compose $(scripts/ms-qr1-compose-flags.sh) exec -T "$service" sh -c '
+    url=http://ms-qr1-host:11434/api/tags
+    if command -v python3 >/dev/null; then
+      python3 -c "import urllib.request; print(urllib.request.urlopen(\"$url\", timeout=5).status)"
+    elif command -v curl >/dev/null; then
+      curl -fsS -o /dev/null -w "%{http_code}\n" "$url"
+    elif command -v wget >/dev/null; then
+      wget -q -O /dev/null "$url" && echo 200
+    else
+      echo "no supported probe tool in $HOSTNAME"
+    fi
+  '
+done
 ss -tlnp | grep ':11434'
 sudo ufw status numbered
 ```
@@ -391,11 +413,11 @@ Blocking QR1 gate:
 
 ```bash
 sudo EXPECTED_MODEL=qwen3.8:27b ENV_FILE="$PWD/.env" scripts/ms-qr1-acceptance.sh
-python scripts/audit-extensions.py
+python3 scripts/audit-extensions.py
 bash tests/test-safe-env.sh
 bash tests/test-secret-security.sh
 bash tests/test-ms-qr1-helpers.sh
-python tests/contracts/test-network-exposure-contracts.py
+python3 tests/contracts/test-network-exposure-contracts.py
 ```
 
 Expected: acceptance checks pass. Qdrant unauthenticated requests must be rejected. Hermes host port `9119` must be unbound. Local-only LiteLLM routes must have no fallback. Rendered QR1 services must match the allow-list/exclusion policy. Every rendered published QR1 service port must bind loopback. Host-agent nmcli endpoints must reject unauthenticated requests on the resolved host-agent bind address.
@@ -446,9 +468,9 @@ sudo systemctl stop ods-host-agent.service
 
 ```bash
 cd ~/ms-ops/ops-centre/ods
+sudo scripts/ms-qr1-ufw-docker-rules.sh remove
 docker compose $(scripts/ms-qr1-compose-flags.sh) down
 sudo tailscale serve reset
-sudo scripts/ms-qr1-ufw-docker-rules.sh remove
 sudo scripts/ms-qr1-ollama-bridge.sh remove
 sudo systemctl disable --now ods-host-agent.service
 sudo rm -f /etc/systemd/system/ods-host-agent.service

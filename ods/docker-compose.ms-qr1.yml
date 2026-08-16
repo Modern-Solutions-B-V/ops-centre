@@ -54,8 +54,18 @@ services:
       SEARXNG_SECRET: "${SEARXNG_SECRET:?SEARXNG_SECRET must be generated for QR1}"
 
   token-spy:
+    extra_hosts:
+      - "ms-qr1-host:${MS_QR1_HOST_GATEWAY:?MS_QR1_HOST_GATEWAY must be discovered with scripts/ms-qr1-ollama-bridge.sh plan}"
     environment:
       TOKEN_SPY_PROVIDER_MODE: local-backend
+
+  perplexica:
+    extra_hosts:
+      - "ms-qr1-host:${MS_QR1_HOST_GATEWAY:?MS_QR1_HOST_GATEWAY must be discovered with scripts/ms-qr1-ollama-bridge.sh plan}"
+
+  privacy-shield:
+    extra_hosts:
+      - "ms-qr1-host:${MS_QR1_HOST_GATEWAY:?MS_QR1_HOST_GATEWAY must be discovered with scripts/ms-qr1-ollama-bridge.sh plan}"
 
   openclaw:
     profiles:

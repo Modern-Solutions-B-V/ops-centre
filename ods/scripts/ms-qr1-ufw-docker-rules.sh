@@ -32,7 +32,6 @@ run_privileged() {
   fi
 }
 
-require docker
 require ufw
 require python3
 require ip
@@ -42,7 +41,8 @@ if [[ ! -x scripts/ms-qr1-compose-flags.sh ]]; then
   exit 1
 fi
 
-mapfile -t networks < <(
+discover_networks() {
+  require docker
   docker compose $(scripts/ms-qr1-compose-flags.sh) config --format json \
     | python3 -c '
 import json, sys
@@ -55,21 +55,33 @@ for key, network in data.get("networks", {}).items():
     else:
         print(key)
 '
-)
+}
 
-if [[ "${#networks[@]}" -eq 0 ]]; then
-  echo "ERROR: no non-internal compose networks found" >&2
-  exit 1
-fi
+discover_rules() {
+  local allow_missing_networks="${1:-false}"
+  local networks=()
+  mapfile -t networks < <(discover_networks)
 
-rules=()
-interface_addrs="$(ip -o -4 addr show)"
-for network in "${networks[@]}"; do
-  [[ -n "$network" ]] || continue
-  inspect_json="$(docker network inspect "$network")"
-  while IFS=$'\t' read -r subnet gateway; do
-    [[ -n "$subnet" && -n "$gateway" ]] || continue
-    if ! INTERFACE_ADDRS="$interface_addrs" python3 - "$subnet" "$gateway" <<'PY'
+  if [[ "${#networks[@]}" -eq 0 ]]; then
+    echo "ERROR: no non-internal compose networks found" >&2
+    return 1
+  fi
+
+  local interface_addrs
+  interface_addrs="$(ip -o -4 addr show)"
+  for network in "${networks[@]}"; do
+    [[ -n "$network" ]] || continue
+    local inspect_json
+    if ! inspect_json="$(docker network inspect "$network")"; then
+      if [[ "$allow_missing_networks" == "true" ]]; then
+        echo "WARNING: Docker network $network is unavailable; relying on UFW comment sweep for stale rules" >&2
+        continue
+      fi
+      return 1
+    fi
+    while IFS=$'\t' read -r subnet gateway; do
+      [[ -n "$subnet" && -n "$gateway" ]] || continue
+      if ! INTERFACE_ADDRS="$interface_addrs" python3 - "$subnet" "$gateway" <<'PY'
 import os
 import ipaddress
 import sys
@@ -89,14 +101,14 @@ for line in os.environ.get("INTERFACE_ADDRS", "").splitlines():
             sys.exit(0)
 sys.exit(1)
 PY
-    then
-      echo "ERROR: $network subnet/gateway validation failed: $subnet -> $gateway" >&2
-      exit 1
-    fi
-    for port in 11434 7710; do
-      rules+=("$subnet|$gateway|$port")
-    done
-  done < <(printf '%s' "$inspect_json" | python3 -c '
+      then
+        echo "ERROR: $network subnet/gateway validation failed: $subnet -> $gateway" >&2
+        return 1
+      fi
+      for port in 11434 7710; do
+        printf '%s|%s|%s\n' "$subnet" "$gateway" "$port"
+      done
+    done < <(printf '%s' "$inspect_json" | python3 -c '
 import ipaddress, json, sys
 for network in json.load(sys.stdin):
     for cfg in network.get("IPAM", {}).get("Config", []):
@@ -109,20 +121,51 @@ for network in json.load(sys.stdin):
         if net.version == 4 and net.is_private and gw.version == 4 and gw.is_private:
             print(f"{net}\t{gw}")
 ')
-done
+  done
+}
 
-if [[ "${#rules[@]}" -eq 0 ]]; then
+qr1_ufw_rule_numbers() {
+  ufw status numbered | python3 -c '
+import re
+import sys
+rules = []
+for line in sys.stdin:
+    if "MS QR1 docker-to-host" not in line:
+        continue
+    match = re.search(r"^\[\s*(\d+)\]", line)
+    if match:
+        rules.append(int(match.group(1)))
+for rule in sorted(set(rules), reverse=True):
+    print(rule)
+'
+}
+
+rules=()
+if [[ "$ACTION" == "remove" ]]; then
+  mapfile -t rules < <(discover_rules true)
+else
+  mapfile -t rules < <(discover_rules false)
+fi
+
+if [[ "${#rules[@]}" -eq 0 && "$ACTION" != "remove" ]]; then
   echo "ERROR: no private IPv4 non-internal Docker rules discovered" >&2
   exit 1
 fi
 
-mapfile -t unique_rules < <(printf '%s\n' "${rules[@]}" | sort -u)
+unique_rules=()
+if [[ "${#rules[@]}" -gt 0 ]]; then
+  mapfile -t unique_rules < <(printf '%s\n' "${rules[@]}" | sort -u)
+fi
 
 echo "MS QR1 UFW rule set:"
-for rule in "${unique_rules[@]}"; do
-  IFS='|' read -r subnet gateway port <<<"$rule"
-  printf '  %s -> %s:%s/tcp\n' "$subnet" "$gateway" "$port"
-done
+if [[ "${#unique_rules[@]}" -gt 0 ]]; then
+  for rule in "${unique_rules[@]}"; do
+    IFS='|' read -r subnet gateway port <<<"$rule"
+    printf '  %s -> %s:%s/tcp\n' "$subnet" "$gateway" "$port"
+  done
+else
+  echo "  no current Docker-derived rules; remove will sweep existing MS QR1 comments"
+fi
 echo
 echo "Current UFW status:"
 if ! ufw status numbered; then
@@ -145,6 +188,16 @@ for rule in "${unique_rules[@]}"; do
     echo "Would remove: ufw delete allow from $subnet to $gateway port $port proto tcp"
   fi
 done
+
+if [[ "$ACTION" == "remove" ]]; then
+  mapfile -t stale_rule_numbers < <(qr1_ufw_rule_numbers)
+  for rule_number in "${stale_rule_numbers[@]}"; do
+    echo "Removing stale/commented QR1 UFW rule number: $rule_number"
+    if ! run_privileged ufw --force delete "$rule_number"; then
+      echo "WARNING: UFW commented rule was already absent or could not be removed: $rule_number" >&2
+    fi
+  done
+fi
 
 echo
 echo "UFW status after $ACTION:"

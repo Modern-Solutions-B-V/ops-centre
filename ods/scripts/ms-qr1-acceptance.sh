@@ -118,12 +118,45 @@ print("published QR1 ports:", ",".join(f"{svc}:{port}" for svc, port, _ in sorte
 PY
 }
 
-check_live_listeners_no_wildcards() {
+check_ms_qr1_host_aliases() {
+  local rendered
+  rendered="$(compose_json)"
+  COMPOSE_JSON="$rendered" python3 - <<'PY'
+import json
+import os
+import sys
+data = json.loads(os.environ["COMPOSE_JSON"])
+bad = []
+for svc_name, svc in data.get("services", {}).items():
+    env = svc.get("environment") or {}
+    values = []
+    if isinstance(env, dict):
+        values.extend(str(value) for value in env.values())
+    elif isinstance(env, list):
+        values.extend(str(value) for value in env)
+    if not any("ms-qr1-host" in value for value in values):
+        continue
+    aliases = [str(item).split("=", 1)[0] for item in svc.get("extra_hosts") or []]
+    if "ms-qr1-host" not in aliases:
+        bad.append(svc_name)
+if bad:
+    print(f"services reference ms-qr1-host without extra_hosts alias: {bad}", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+check_live_listeners_loopback_and_bridge_no_wildcard() {
   require ss
   ss -tlnp | awk '
-    /:(11434|7710|3000|3001|3002|3004|3005|3006|4000|5678|6333|6334|7890|8085|8090|8188|8880|8888|9000|9120) / {
+    /:(3000|3001|3002|3004|3005|3006|4000|5678|6333|6334|7890|8085|8090|8188|8880|8888|9000|9120) / {
+      if ($4 !~ /^127\.0\.0\.1:/ && $4 !~ /^\[::1\]:/) {
+        print "non-loopback QR1 service bind: " $0
+        bad=1
+      }
+    }
+    /:(11434|7710) / {
       if ($4 ~ /^0\.0\.0\.0:/ || $4 ~ /^\[::\]:/) {
-        print "wildcard bind: " $0
+        print "wildcard QR1 bridge bind: " $0
         bad=1
       }
     }
@@ -172,12 +205,57 @@ PY
 
 check_container_ollama_route() {
   require docker
-  docker compose $(scripts/ms-qr1-compose-flags.sh) exec -T litellm \
-    python3 -c 'import urllib.request; print(urllib.request.urlopen("http://ms-qr1-host:11434/api/tags", timeout=5).status)' \
-    | grep -Fx '200'
-  docker compose $(scripts/ms-qr1-compose-flags.sh) exec -T dashboard-api \
-    python3 -c 'import urllib.request; print(urllib.request.urlopen("http://ms-qr1-host:11434/api/tags", timeout=5).status)' \
-    | grep -Fx '200'
+  local rendered services service rc output
+  rendered="$(compose_json)"
+  mapfile -t services < <(COMPOSE_JSON="$rendered" python3 - <<'PY'
+import json
+import os
+data = json.loads(os.environ["COMPOSE_JSON"])
+for svc_name, svc in sorted(data.get("services", {}).items()):
+    env = svc.get("environment") or {}
+    values = []
+    if isinstance(env, dict):
+        values.extend(str(value) for value in env.values())
+    elif isinstance(env, list):
+        values.extend(str(value) for value in env)
+    if any("ms-qr1-host" in value for value in values):
+        print(svc_name)
+PY
+)
+  services=("litellm" "${services[@]}")
+  mapfile -t services < <(printf '%s\n' "${services[@]}" | awk 'NF && !seen[$0]++')
+  for service in "${services[@]}"; do
+    set +e
+    output="$(docker compose $(scripts/ms-qr1-compose-flags.sh) exec -T "$service" sh -c '
+      url=http://ms-qr1-host:11434/api/tags
+      if command -v python3 >/dev/null; then
+        python3 -c "import urllib.request; print(urllib.request.urlopen(\"$url\", timeout=5).status)"
+      elif command -v python >/dev/null; then
+        python -c "import urllib.request; print(urllib.request.urlopen(\"$url\", timeout=5).status)"
+      elif command -v curl >/dev/null; then
+        curl -fsS -o /dev/null -w "%{http_code}\n" "$url"
+      elif command -v wget >/dev/null; then
+        wget -q -O /dev/null "$url" && echo 200
+      else
+        echo "SKIP no supported HTTP probe tool in container"
+        exit 77
+      fi
+    ')"
+    rc="$?"
+    set -e
+    if [[ "$rc" == "77" ]]; then
+      printf '%s: %s\n' "$service" "$output"
+      continue
+    fi
+    if [[ "$rc" != "0" ]]; then
+      printf '%s: route probe failed: %s\n' "$service" "$output" >&2
+      return 1
+    fi
+    printf '%s\n' "$output" | grep -Fx '200' >/dev/null || {
+      printf '%s: expected HTTP 200, got: %s\n' "$service" "$output" >&2
+      return 1
+    }
+  done
 }
 
 discover_host_agent_url() {
@@ -216,7 +294,8 @@ check "LiteLLM QR1 has exactly one external model" check_one_external_model
 check "LiteLLM local model matches EXTERNAL_LLM_MODEL" check_local_model_matches_env
 check "rendered QR1 service allow-list and exclusions" check_rendered_services_policy
 check "rendered QR1 published ports are loopback" check_rendered_published_ports_loopback
-check "live QR1-relevant listeners have no wildcard binds" check_live_listeners_no_wildcards
+check "ms-qr1-host env references have host aliases" check_ms_qr1_host_aliases
+check "live QR1 service listeners are loopback and bridge listeners are not wildcard" check_live_listeners_loopback_and_bridge_no_wildcard
 check "Hermes TUI/9119 disabled" check_hermes_tui
 check "Qdrant rejects unauthenticated requests" check_qdrant_auth
 check "rendered env/config contains no placeholders" check_no_placeholders

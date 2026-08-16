@@ -81,11 +81,17 @@ for key, network in data.get("networks", {}).items():
 )
 
 gateway_candidates=()
+ods_network_gateway=""
 for network in "${network_names[@]}"; do
   [[ -n "$network" ]] || continue
   inspect_json="$(docker network inspect "$network")"
   while IFS= read -r gateway; do
-    [[ -n "$gateway" ]] && gateway_candidates+=("$gateway")
+    if [[ -n "$gateway" ]]; then
+      gateway_candidates+=("$gateway")
+      if [[ "$network" == "ods-network" ]]; then
+        ods_network_gateway="$gateway"
+      fi
+    fi
   done < <(printf '%s' "$inspect_json" | python3 -c '
 import ipaddress, json, sys
 for network in json.load(sys.stdin):
@@ -135,6 +141,16 @@ if [[ "${#valid_gateways[@]}" -eq 0 ]]; then
   exit 1
 fi
 
+if [[ -z "$ods_network_gateway" ]]; then
+  echo "ERROR: rendered QR1 stack must include non-internal Docker network named ods-network" >&2
+  exit 1
+fi
+
+if ! printf '%s\n' "${valid_gateways[@]}" | grep -Fx "$ods_network_gateway" >/dev/null; then
+  echo "ERROR: ods-network gateway $ods_network_gateway does not match a host interface address" >&2
+  exit 1
+fi
+
 addr_list="$(printf '%s\n' "${valid_gateways[@]}" | paste -sd ' ' -)"
 
 render_unit() {
@@ -147,7 +163,7 @@ Wants=docker.service
 [Service]
 Type=simple
 Environment="MS_QR1_OLLAMA_BRIDGE_ADDRS=$addr_list"
-ExecStart=/bin/sh -c 'for addr in \$\$MS_QR1_OLLAMA_BRIDGE_ADDRS; do if [ -z "\$\$addr" ]; then exit 64; fi; socat TCP-LISTEN:11434,bind=\$\$addr,reuseaddr,fork TCP:127.0.0.1:11434 & done; wait'
+ExecStart=/bin/sh -c 'if [ -z "\$\$MS_QR1_OLLAMA_BRIDGE_ADDRS" ]; then exit 64; fi; for addr in \$\$MS_QR1_OLLAMA_BRIDGE_ADDRS; do if [ -z "\$\$addr" ]; then exit 64; fi; socat TCP-LISTEN:11434,bind=\$\$addr,reuseaddr,fork TCP:127.0.0.1:11434 & done; wait'
 Restart=on-failure
 RestartSec=5
 
@@ -162,7 +178,7 @@ printf '  %s:11434\n' "${valid_gateways[@]}" >&2
 
 if [[ "$ACTION" == "plan" ]]; then
   echo "Set in .env before final compose render:"
-  printf 'MS_QR1_HOST_GATEWAY=%s\n' "${valid_gateways[0]}"
+  printf 'MS_QR1_HOST_GATEWAY=%s\n' "$ods_network_gateway"
   echo
   echo "Would install $SERVICE_NAME using socat. No Ollama bind change is required."
   exit 0

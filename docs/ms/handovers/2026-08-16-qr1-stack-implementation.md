@@ -27,6 +27,7 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 - UFW rules are scoped from non-internal Docker CIDR(s) to their matching Docker gateway on TCP `11434` and `7710`; the internal Langfuse network is excluded.
 - The host-agent systemd service is a required QR1 host prerequisite because the approved trust matrix includes dashboard-api host-agent access on `7710`.
 - No AMD tuning, UMA/GTT/IOMMU, Lemonade, email, Jira, client-system credentials, production secrets, ODS Tailscale extension, ods-proxy, Brave Search, OpenClaw, ODS OpenCode extension, remote-provider egress service, or remote-provider SSH tunnel are enabled.
+- `model-router` remains present in the rendered QR1 stack as an inert/internal core service: it publishes no port and its configured endpoint points only at excluded `llama-server:8080`, so it is not a QR1 egress path.
 - Hermes dashboard TUI is forced off with `HERMES_DASHBOARD_TUI=0`.
 - Qdrant and SearXNG require non-empty generated secrets.
 - Host-agent nmcli routes have no supported disable switch in upstream config; QR1 documents and tests unauthenticated denial instead of editing core host-agent code.
@@ -38,11 +39,11 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 cd ods
 docker compose $(scripts/ms-qr1-compose-flags.sh) config
 sudo EXPECTED_MODEL=<qr1-ollama-model> ENV_FILE="$PWD/.env" scripts/ms-qr1-acceptance.sh
-python scripts/audit-extensions.py
+python3 scripts/audit-extensions.py
 bash tests/test-safe-env.sh
 bash tests/test-secret-security.sh
 bash tests/test-ms-qr1-helpers.sh
-python tests/contracts/test-network-exposure-contracts.py
+python3 tests/contracts/test-network-exposure-contracts.py
 git diff --check
 ```
 
@@ -50,4 +51,4 @@ git diff --check
 
 ## Rollback
 
-Follow `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`: stop the compose stack, remove Tailscale serve mappings, run `sudo scripts/ms-qr1-ufw-docker-rules.sh remove`, remove the MS QR1 Ollama bridge, remove the host-agent unit, and shred the filled `.env`.
+Follow `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`: run `sudo scripts/ms-qr1-ufw-docker-rules.sh remove` before Compose teardown, stop the compose stack, remove Tailscale serve mappings, remove the MS QR1 Ollama bridge, remove the host-agent unit, and shred the filled `.env`.

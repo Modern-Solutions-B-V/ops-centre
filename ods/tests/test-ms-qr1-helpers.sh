@@ -35,6 +35,9 @@ if [[ "${1:-}" == "compose" && " $* " == *" config "* ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "network" && "${2:-}" == "inspect" ]]; then
+  if [[ "${DOCKER_NETWORK_MODE:-normal}" == "missing" ]]; then
+    exit 1
+  fi
   case "${3:-}" in
     ods-network) cat "$FIXTURE_DIR/network-ods-network.json" ;;
     ods-public-extra) cat "$FIXTURE_DIR/network-ods-public-extra.json" ;;
@@ -68,7 +71,11 @@ set -euo pipefail
 state="$FIXTURE_DIR/ufw-state.txt"
 touch "$state"
 if [[ "${1:-}" == "status" ]]; then
-  cat "$state"
+  line_no=1
+  while IFS= read -r line; do
+    printf '[%2d] %s\n' "$line_no" "$line"
+    line_no=$((line_no + 1))
+  done < "$state"
   exit 0
 fi
 if [[ "${1:-}" == "allow" ]]; then
@@ -79,6 +86,13 @@ if [[ "${1:-}" == "delete" && "${2:-}" == "allow" ]]; then
   needle="${*:3}"
   tmp="$state.tmp"
   awk -v needle="$needle" 'index($0, needle) != 1 {print}' "$state" > "$tmp"
+  mv "$tmp" "$state"
+  exit 0
+fi
+if [[ "${1:-}" == "--force" && "${2:-}" == "delete" ]]; then
+  rule_number="${3:-}"
+  tmp="$state.tmp"
+  awk -v target="$rule_number" 'NR != target {print}' "$state" > "$tmp"
   mv "$tmp" "$state"
   exit 0
 fi
@@ -107,8 +121,28 @@ cat > "$tmpdir/compose-config.json" <<'JSON'
     "langfuse-internal": {"name": "ods_langfuse-internal", "internal": true}
   },
   "services": {
-    "litellm": {"ports": [{"host_ip": "127.0.0.1", "published": "4000"}]},
-    "dashboard-api": {"ports": [{"host_ip": "127.0.0.1", "published": "3002"}]}
+    "litellm": {
+      "extra_hosts": ["ms-qr1-host=172.31.0.1"],
+      "environment": {"OPENAI_BASE_URL": "http://ms-qr1-host:11434/v1"},
+      "ports": [{"host_ip": "127.0.0.1", "published": "4000"}]
+    },
+    "dashboard-api": {
+      "extra_hosts": ["ms-qr1-host=172.31.0.1"],
+      "environment": {"OLLAMA_URL": "http://ms-qr1-host:11434"},
+      "ports": [{"host_ip": "127.0.0.1", "published": "3002"}]
+    },
+    "perplexica": {
+      "extra_hosts": ["ms-qr1-host=172.31.0.1"],
+      "environment": {"OPENAI_BASE_URL": "http://ms-qr1-host:11434/v1"}
+    },
+    "privacy-shield": {
+      "extra_hosts": ["ms-qr1-host=172.31.0.1"],
+      "environment": {"TARGET_API_URL": "http://ms-qr1-host:11434/v1"}
+    },
+    "token-spy": {
+      "extra_hosts": ["ms-qr1-host=172.31.0.1"],
+      "environment": {"OLLAMA_URL": "http://ms-qr1-host:11434"}
+    }
   }
 }
 JSON
@@ -119,7 +153,7 @@ cat > "$tmpdir/network-ods-network.json" <<'JSON'
     "Name": "ods-network",
     "IPAM": {
       "Config": [
-        {"Subnet": "172.28.0.0/16", "Gateway": "172.28.0.1"}
+        {"Subnet": "172.31.0.0/16", "Gateway": "172.31.0.1"}
       ]
     }
   }
@@ -132,7 +166,7 @@ cat > "$tmpdir/network-ods-public-extra.json" <<'JSON'
     "Name": "ods-public-extra",
     "IPAM": {
       "Config": [
-        {"Subnet": "172.30.0.0/16", "Gateway": "172.30.0.1"}
+        {"Subnet": "172.20.0.0/16", "Gateway": "172.20.0.1"}
       ]
     }
   }
@@ -140,16 +174,16 @@ cat > "$tmpdir/network-ods-public-extra.json" <<'JSON'
 JSON
 
 cat > "$tmpdir/ip-addr.txt" <<'EOF'
-7: br-a inet 172.28.0.1/16 brd 172.28.255.255 scope global br-a
-8: br-b inet 172.30.0.1/16 brd 172.30.255.255 scope global br-b
+7: br-a inet 172.31.0.1/16 brd 172.31.255.255 scope global br-a
+8: br-b inet 172.20.0.1/16 brd 172.20.255.255 scope global br-b
 9: br-internal inet 172.29.0.1/16 brd 172.29.255.255 scope global br-internal
 EOF
 
 env_prefix=(env FIXTURE_DIR="$tmpdir" PATH="$tmpdir:$PATH")
 
 "${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh plan > "$tmpdir/ufw-plan.out"
-assert_contains "172.28.0.0/16 -> 172.28.0.1:11434/tcp" "$tmpdir/ufw-plan.out"
-assert_contains "172.30.0.0/16 -> 172.30.0.1:7710/tcp" "$tmpdir/ufw-plan.out"
+assert_contains "172.31.0.0/16 -> 172.31.0.1:11434/tcp" "$tmpdir/ufw-plan.out"
+assert_contains "172.20.0.0/16 -> 172.20.0.1:7710/tcp" "$tmpdir/ufw-plan.out"
 assert_not_contains "172.29.0.0/16" "$tmpdir/ufw-plan.out"
 
 "${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh apply > "$tmpdir/ufw-apply.out"
@@ -165,13 +199,57 @@ assert_not_contains "172.29.0.0/16" "$tmpdir/ufw-plan.out"
   exit 1
 }
 
+"${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh apply > "$tmpdir/ufw-apply-missing.out"
+DOCKER_NETWORK_MODE=missing "${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh remove > "$tmpdir/ufw-remove-missing.out"
+[[ ! -s "$tmpdir/ufw-state.txt" ]] || {
+  echo "expected zero QR1 UFW rules after remove with missing Docker networks" >&2
+  cat "$tmpdir/ufw-state.txt" >&2
+  exit 1
+}
+
+"${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh apply > "$tmpdir/ufw-apply-drift.out"
+cp "$tmpdir/network-ods-network.json" "$tmpdir/network-ods-network.original.json"
+cat > "$tmpdir/network-ods-network.json" <<'JSON'
+[
+  {
+    "Name": "ods-network",
+    "IPAM": {
+      "Config": [
+        {"Subnet": "172.32.0.0/16", "Gateway": "172.32.0.1"}
+      ]
+    }
+  }
+]
+JSON
+cat > "$tmpdir/ip-addr.txt" <<'EOF'
+7: br-a inet 172.32.0.1/16 brd 172.32.255.255 scope global br-a
+8: br-b inet 172.20.0.1/16 brd 172.20.255.255 scope global br-b
+9: br-internal inet 172.29.0.1/16 brd 172.29.255.255 scope global br-internal
+EOF
+"${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh remove > "$tmpdir/ufw-remove-drift.out"
+[[ ! -s "$tmpdir/ufw-state.txt" ]] || {
+  echo "expected zero QR1 UFW rules after remove with Docker subnet drift" >&2
+  cat "$tmpdir/ufw-state.txt" >&2
+  exit 1
+}
+mv "$tmpdir/network-ods-network.original.json" "$tmpdir/network-ods-network.json"
+cat > "$tmpdir/ip-addr.txt" <<'EOF'
+7: br-a inet 172.31.0.1/16 brd 172.31.255.255 scope global br-a
+8: br-b inet 172.20.0.1/16 brd 172.20.255.255 scope global br-b
+9: br-internal inet 172.29.0.1/16 brd 172.29.255.255 scope global br-internal
+EOF
+
 "${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh render-unit > "$tmpdir/bridge.unit"
-assert_contains 'Environment="MS_QR1_OLLAMA_BRIDGE_ADDRS=172.28.0.1 172.30.0.1"' "$tmpdir/bridge.unit"
+assert_contains 'Environment="MS_QR1_OLLAMA_BRIDGE_ADDRS=172.20.0.1 172.31.0.1"' "$tmpdir/bridge.unit"
+assert_contains 'if [ -z "$$MS_QR1_OLLAMA_BRIDGE_ADDRS" ]; then exit 64; fi' "$tmpdir/bridge.unit"
 assert_contains 'for addr in $$MS_QR1_OLLAMA_BRIDGE_ADDRS' "$tmpdir/bridge.unit"
 assert_contains 'bind=$$addr' "$tmpdir/bridge.unit"
 assert_not_contains 'bind=,' "$tmpdir/bridge.unit"
 assert_not_contains '0.0.0.0' "$tmpdir/bridge.unit"
 assert_not_contains '172.29.0.1' "$tmpdir/bridge.unit"
+
+"${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh plan > "$tmpdir/bridge.plan"
+assert_contains 'MS_QR1_HOST_GATEWAY=172.31.0.1' "$tmpdir/bridge.plan"
 
 for f in \
   scripts/ms-qr1-compose-flags.sh \
@@ -203,9 +281,35 @@ assert_contains 'json.loads(os.environ["OLLAMA_TAGS_JSON"])' scripts/ms-qr1-acce
 assert_contains 'json.loads(os.environ["COMPOSE_JSON"])' scripts/ms-qr1-acceptance.sh
 assert_contains 'check_rendered_published_ports_loopback' scripts/ms-qr1-acceptance.sh
 assert_contains 'check_rendered_services_policy' scripts/ms-qr1-acceptance.sh
+assert_contains 'check_ms_qr1_host_aliases' scripts/ms-qr1-acceptance.sh
+assert_contains 'check_live_listeners_loopback_and_bridge_no_wildcard' scripts/ms-qr1-acceptance.sh
+assert_contains 'services=("litellm" "${services[@]}")' scripts/ms-qr1-acceptance.sh
 assert_contains 'SDXL_REVISION=c6c10e8716de60c7ef4eed6b89a06f67e772b374' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'SDXL_SHA256=e0d996ee0013e79d9d3561f50fcafb9a17e3ff07b780358e3b66d67932c4d490' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'sha256sum -c -' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --no-start' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --force-recreate' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_not_contains 'docker network create ods-network' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'sudo systemctl restart ods-host-agent.service' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+
+COMPOSE_JSON="$(cat "$tmpdir/compose-config.json")" python3 - <<'PY'
+import json
+import os
+import sys
+data = json.loads(os.environ["COMPOSE_JSON"])
+bad = []
+for svc_name, svc in data.get("services", {}).items():
+    env = svc.get("environment") or {}
+    values = list(env.values()) if isinstance(env, dict) else env
+    if not any("ms-qr1-host" in str(value) for value in values):
+        continue
+    aliases = [str(item).split("=", 1)[0] for item in svc.get("extra_hosts") or []]
+    if "ms-qr1-host" not in aliases:
+        bad.append(svc_name)
+if bad:
+    print(f"fixture services missing ms-qr1-host aliases: {bad}", file=sys.stderr)
+    sys.exit(1)
+PY
 
 env_model="$(awk -F= '$1 == "EXTERNAL_LLM_MODEL" {print $2}' profiles/ms-qr1.env.example | tail -1)"
 config_model="$(sed -n 's/.*model:[[:space:]]*openai\///p' config/litellm/ms-qr1.yaml | head -1)"
