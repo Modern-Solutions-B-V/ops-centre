@@ -8,6 +8,108 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-16 — Add QR1 deployment profile
+
+### Change ID
+`MSODS-0004`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`feature/qr1-stack` / pending
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`CONFIGURE` + `EXTEND`
+
+### Files changed
+- `ods/config/litellm/ms-qr1.yaml`
+- `ods/docker-compose.ms-qr1.yml`
+- `ods/extensions/services/langfuse/compose.yaml`
+- `ods/profiles/ms-qr1.env.example`
+- `ods/scripts/ms-qr1-compose-flags.sh`
+- `ods/scripts/ms-qr1-ufw-docker-rules.sh`
+- `ods/scripts/ms-qr1-acceptance.sh`
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Prepare all repository artifacts required for Modi to deploy QR1 safely on
+EVO-X3 later, without Codex touching or deploying on the host.
+
+### MS requirement / ADR
+QR1 cross-review decisions D-1, D-2, D-6 and D-7; QR1 backlog BLK-1..4;
+ODS adoption decision.
+
+### Behavior before
+The fork inherited upstream deploy defaults: hybrid LiteLLM could silently
+fallback local requests to cloud, Hermes dashboard TUI defaulted on, Qdrant
+could run with an empty API key, and the repo had no QR1-specific profile,
+UFW helper, acceptance helper or operator runbook.
+
+### Behavior after
+QR1 has a placeholder-only env profile, a LiteLLM config with fail-closed local
+routes and exactly one external model (`anthropic/claude-sonnet-5`), a final
+compose override that forces `HERMES_DASHBOARD_TUI=0`, requires non-empty
+Qdrant/SearXNG secrets, routes apps to host-native Ollama, enables the shipped
+Langfuse compose template, and profile-gates OpenClaw, ODS Tailscale,
+ods-proxy and Brave Search. The ODS OpenCode host-systemd extension remains
+excluded by not installing/enabling it. MS helper scripts discover Docker
+subnets for UFW rules and run QR1 acceptance checks.
+
+### Security / privacy impact
+Positive. Local-only routes no longer have external fallbacks, dangerous QR1
+components are excluded, Hermes PTY endpoints are disabled, Qdrant auth is
+required, generated secrets are required for deploy, and Docker-to-host UFW
+rules are limited to discovered private Docker CIDRs and ports 11434/7710.
+No real secrets, client data, email/Jira/client-system credentials, production
+secrets or unrestricted egress are added.
+
+### Upgrade / upstream impact
+Low. Changes are additive MS-owned profile/config/docs/scripts plus a QR1
+compose override; no ODS core code or installer behavior is changed.
+
+### Validation performed
+Before PR:
+- `python scripts/audit-extensions.py`
+- `docker compose $(scripts/ms-qr1-compose-flags.sh) config`
+- `bash tests/test-safe-env.sh`
+- `bash tests/test-secret-security.sh`
+- `python tests/contracts/test-network-exposure-contracts.py`
+- `git diff --check`
+- secret scan of changed files for real keys/tokens
+
+Also run:
+- `bash tests/test-network-security.sh`
+
+That static script failed with 19 findings against broad optional compose files
+and the ODS Tailscale host-network extension, while reporting 23 secure and 0
+insecure port bindings. QR1 uses the explicit rendered QR1 compose file set
+and `tests/contracts/test-network-exposure-contracts.py` for the deploy gate
+because the static script does not model QR1 exclusions.
+
+On EVO-X3 later:
+- `EXPECTED_MODEL=<qr1-ollama-model> scripts/ms-qr1-acceptance.sh`
+- UFW before/after and rollback evidence per `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+
+### Rollback
+Repository rollback: revert the QR1 deployment-profile commit.
+
+Host rollback after deployment: run `docker compose ... down`, `sudo tailscale
+serve reset`, delete MS QR1 UFW rules by number in descending order, and shred
+the filled `.env`, as documented in `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`.
+
+### Notes
+Host-agent nmcli/Wi-Fi routes have no supported CONFIGURE switch in upstream
+ODS. QR1 therefore documents and tests the unauthenticated 401/403 boundary
+instead of making a core host-agent change.
+
+---
+
 ## Entry Template
 
 ## YYYY-MM-DD — `<short title>`

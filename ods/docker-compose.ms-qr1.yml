@@ -1,0 +1,70 @@
+# MS QR1 deployment override.
+# This file is intentionally appended last by scripts/ms-qr1-compose-flags.sh.
+
+services:
+  llama-server:
+    profiles:
+      - ms-qr1-excluded
+
+  litellm:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config/litellm/ms-qr1.yaml:/app/config.yaml:ro,z
+    environment:
+      ODS_MODE: local
+      ODS_MODEL_SWITCHBOARD: observe
+      LITELLM_MASTER_KEY: "${LITELLM_KEY:?LITELLM_KEY must be generated for QR1}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be supplied only to LiteLLM for QR1}"
+      OPENAI_API_KEY: ""
+      TOGETHER_API_KEY: ""
+      MINIMAX_API_KEY: ""
+
+  open-webui:
+    environment:
+      WEBUI_AUTH: "true"
+      ENABLE_SIGNUP: "${WEBUI_ENABLE_SIGNUP:-false}"
+      OPENAI_API_BASE_URL: "http://litellm:4000/v1"
+      OPENAI_API_KEY: "${LITELLM_KEY:?LITELLM_KEY must be generated for QR1}"
+
+  dashboard-api:
+    environment:
+      LLM_BACKEND: external
+      LLM_API_BASE_PATH: /v1
+      LLM_URL: "http://host.docker.internal:11434"
+      OLLAMA_URL: "http://host.docker.internal:11434"
+      ODS_TALK_VISION_URL: "http://host.docker.internal:11434/v1"
+
+  hermes:
+    environment:
+      HERMES_DASHBOARD_TUI: "0"
+      HERMES_LLM_BASE_URL: "http://litellm:4000/v1"
+      HERMES_LLM_API_KEY: "${LITELLM_KEY:?LITELLM_KEY must be generated for QR1}"
+
+  qdrant:
+    environment:
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY must be generated for QR1}"
+
+  searxng:
+    environment:
+      SEARXNG_SECRET: "${SEARXNG_SECRET:?SEARXNG_SECRET must be generated for QR1}"
+
+  token-spy:
+    environment:
+      TOKEN_SPY_PROVIDER_MODE: local-backend
+
+  openclaw:
+    profiles:
+      - ms-qr1-excluded
+
+  tailscale:
+    profiles:
+      - ms-qr1-excluded
+
+  ods-proxy:
+    profiles:
+      - ms-qr1-excluded
+
+  brave-search:
+    profiles:
+      - ms-qr1-excluded
