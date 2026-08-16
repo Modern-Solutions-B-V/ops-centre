@@ -66,6 +66,8 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== safe .env loading (quote/CRLF handling) ==="
 	@bash tests/test-safe-env.sh
+	@echo "=== MS QR1 helper regressions ==="
+	@bash tests/test-ms-qr1-helpers.sh
 	@echo ""
 	@echo "=== QR code helper LAN detection ==="
 	@bash tests/test-qrcode-helper.sh
