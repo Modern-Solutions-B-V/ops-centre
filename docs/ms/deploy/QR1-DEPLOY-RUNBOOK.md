@@ -239,12 +239,12 @@ a writable bind mount intersecting `data/n8n`, `data/persona`, or
 `data/langfuse` such as n8n, dashboard-api and rendered Langfuse state
 writers. Compose stop succeeds, `verify-quiescent` confirms no corresponding
 writer container is running, and only then do the Langfuse ownership hook and
-QR1 `prestart-init` run. The Langfuse hook also independently enforces the
-same quiescence boundary through the deployment-neutral
-`scripts/ods-verify-quiescent-data-writers.sh` verifier before ownership
-mutation, so host-agent or direct hook invocation cannot bypass the ADR. Langfuse PostgreSQL and ClickHouse bind-mount
-directories are owned for their container users; SDXL Lightning checkpoint
-exists only after SHA256 verification succeeds.
+QR1 `prestart-init` run. QR1 relies on this runbook-owned stop/verify gate
+before invoking the generic Langfuse hook; generic dashboard-driven Langfuse
+setup hardening is tracked separately in
+`docs/ms/backlog/GENERIC-ODS-LIFECYCLE-HARDENING.md`. Langfuse PostgreSQL and
+ClickHouse bind-mount directories are owned for their container users; SDXL
+Lightning checkpoint exists only after SHA256 verification succeeds.
 `data/persona/SOUL.md` is a regular UTF-8 file generated through
 `scripts/build-installation-context.py` into a same-directory temporary file
 and atomically renamed into place; `data/persona/SOUL.md` is not a directory

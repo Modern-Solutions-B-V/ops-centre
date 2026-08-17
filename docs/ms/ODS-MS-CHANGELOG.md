@@ -39,6 +39,7 @@ Codex
 - `docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md`
 - `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
 - `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/backlog/GENERIC-ODS-LIFECYCLE-HARDENING.md`
 - `AGENTS.md`
 - `docs/ms/ODS-MS-CHANGELOG.md`
 
@@ -130,18 +131,18 @@ MS data: derive writer services, stop them through Compose, verify quiescence,
 then run privileged hooks/helpers. The previous manual `rm`/`chown` persona
 recovery path and best-effort `|| true` writer stop were removed.
 
-Architecture-conformance and shared-enforcement correction: the read-only
-`scripts/ods-verify-quiescent-data-writers.sh` helper now provides the
-deployment-neutral mutation-boundary verifier. It accepts target persistent
-path(s), renders the active Compose model for the current deployment, derives
-all writable bind-mount writers, and fails if any corresponding container is
-running. QR1 `prestart-init`, Langfuse `post_install.sh`, and
-`lib/rootless-ownership.sh` now use that shared verifier before privileged or
-helper-container recursive mutation. This closes supported alternate call
-paths such as `ods-host-agent.py` -> rootless ownership repair and
-`ods-host-agent.py` -> Langfuse setup/post_install hook while preserving
-generic non-QR1 Langfuse setup; shared hooks no longer depend on QR1 compose
-flags or `compose.yaml.disabled`.
+Scope correction: the QR1 quiescence ADR is binding for MS Ops Centre QR1
+deployment, repair and acceptance paths only. `scripts/ods-verify-quiescent-data-writers.sh`
+is retained as the read-only writer-derivation helper used by QR1; QR1 invokes
+it with the canonical complete QR1 Compose model from
+`scripts/ms-qr1-compose-flags.sh`, so caller-supplied
+`ODS_QUIESCENCE_COMPOSE_FLAGS` or target overrides cannot remove base writers
+from QR1 mutation-boundary checks. The previous attempt to enforce this QR1
+decision unconditionally in generic Langfuse and Docker-rootless lifecycle
+paths was removed from this PR. Generic ODS lifecycle issues discovered during
+review are documented in
+`docs/ms/backlog/GENERIC-ODS-LIFECYCLE-HARDENING.md` and are not claimed fixed
+here.
 
 ### Security / privacy impact
 Positive. The fix does not widen listener scope or add external fallback
@@ -154,34 +155,24 @@ Acceptance now captures `ss -tlnp` before listener parsing and fails if the
 listener snapshot cannot be collected.
 
 ### Privileged-operation audit
-Reviewed QR1-owned references to `sudo`, `chown`, `chmod`, `rm -rf`,
-privileged hooks, `|| true`, and check/acceptance mutation. Container-writable
-MS data mutations are now limited to: Langfuse `post_install.sh` after the
-shared verifier approves `data/langfuse`; Docker-rootless ownership repair
-after the same shared verifier approves each target path; and `prestart-init`
-after its own fixed-target writer-container gate. Runtime `check` and QR1
-acceptance remain read-only. Other `sudo`/`rm` occurrences are host
-service/firewall/package/checkpoint rollback operations outside the reviewed
-container-writable MS persistent data repair paths, or test fixtures.
+Bounded QR1 audit reviewed paths executed by the QR1 deployment runbook and QR1
+acceptance flow. In QR1, container-writable MS data mutation happens only after
+the runbook derives QR1 writer services from the complete QR1 Compose model,
+stops them, and verifies no corresponding writer container is running. Runtime
+`check` and QR1 acceptance remain read-only. Generic host-agent/rootless,
+installer rerun, purge and uninstall mutation paths were reviewed only to
+classify whether QR1 invokes them; they are deferred in the lifecycle-hardening
+backlog rather than claimed remediated by this QR1 PR.
 
 Call-path audit for QR1 privileged persistent-state mutation:
 
-- `data/langfuse/postgres`, `data/langfuse/clickhouse`: `mkdir`/ownership
-  repair through `extensions/services/langfuse/hooks/post_install.sh`, called
-  by the QR1 runbook, dashboard/template setup via `ods-host-agent.py`, the
-  setup-hook endpoint, and direct shell invocation. Possible writers are
-  derived from rendered writable bind mounts intersecting `data/langfuse`,
-  including broad `./data` writers such as `dashboard-api` and Langfuse state
-  containers. Enforcement point: the hook itself runs
-  `scripts/ods-verify-quiescent-data-writers.sh verify --target data/langfuse`
-  before mutation.
-- Docker-rootless ownership repair: recursive helper-container `chown`/`chmod`
-  through `lib/rootless-ownership.sh`, called by host-agent start/install
-  flows and repair commands. Possible writers are derived per target path from
-  the active Compose model, including broad `./data` writers. Enforcement
-  point: `lib/rootless-ownership.sh` runs
-  `scripts/ods-verify-quiescent-data-writers.sh verify --target <path>` before
-  creating or recursively mutating each target.
+- `data/langfuse/postgres`, `data/langfuse/clickhouse`: ownership repair
+  through `extensions/services/langfuse/hooks/post_install.sh`, invoked by the
+  QR1 runbook only after QR1 `writer-services`, Compose stop and
+  `verify-quiescent` have passed. Possible QR1 writers are rendered writable
+  bind mounts intersecting `data/langfuse`, including broad `./data` writers
+  such as `dashboard-api` and Langfuse state containers. Enforcement point for
+  QR1 is the runbook-owned stop/verify gate immediately before the hook call.
 - `data/persona`, `data/persona/SOUL.md`: owner repair, empty Docker-created
   directory repair, and atomic persona replacement happen through
   `scripts/ms-qr1-prestart-provision.sh prestart-init`; post-start refresh is
@@ -194,12 +185,23 @@ Call-path audit for QR1 privileged persistent-state mutation:
   broad `./data` writers. Enforcement point: `prestart-init` invokes its own
   writer-container gate before mutation.
 
+Generic findings classified but deferred:
+
+- `MSODS-LIFE-0001`: host-agent Docker-rootless ownership repair. QR1
+  invocation: no for EVO-X3 QR1/rootful Docker; deferred.
+- `MSODS-LIFE-0002`: dashboard-driven Langfuse setup quiescence. QR1
+  invocation: only through the QR1 runbook after QR1 stop/verify; generic
+  dashboard orchestration deferred.
+- `MSODS-LIFE-0003`: generic/rootful installer rerun ownership repair. QR1
+  invocation: no; deferred.
+- `MSODS-LIFE-0004`: `ods purge` quiescence. QR1 invocation: no; deferred.
+- `MSODS-LIFE-0005`: `ods-uninstall.sh` writer termination. QR1 invocation:
+  no; deferred.
+
 ### Upgrade / upstream impact
-Low to medium. The Ollama proxy and persona/n8n provisioning behavior remains
-QR1-scoped, while quiescence enforcement for privileged persistent-state
-mutation is now shared by Langfuse setup and Docker-rootless ownership repair.
-Generic ODS Langfuse setup remains supported because shared hooks call the
-deployment-neutral verifier rather than QR1 compose helpers.
+Low. The corrective behavior is QR1-scoped. Generic ODS Langfuse setup and
+Docker-rootless lifecycle semantics are not redesigned by this PR; generic
+findings are documented for later upstream/lifecycle hardening.
 
 ### Qualification status
 Local/static/CI validation passed for this corrective branch. Hardware-backed
@@ -236,12 +238,12 @@ These items are pending live qualification, not PASS evidence.
 - `RUFF_CACHE_DIR=/tmp/ms-qr1-ruff-cache /tmp/ms-qr1-ruff/bin/ruff check ods/ --select E,F,W --ignore E501,E701,E731,E741,E402`
 - `for f in ods/scripts/ods-verify-quiescent-data-writers.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-prestart-provision.sh ods/scripts/ms-qr1-acceptance.sh ods/extensions/services/langfuse/hooks/post_install.sh ods/lib/rootless-ownership.sh ods/tests/test-ms-qr1-helpers.sh; do bash -n "$f"; done`
 - `(cd ods && bash scripts/validate-env.sh profiles/ms-qr1.env.example)`
-- `PYTHONPYCACHEPREFIX=/tmp/ms-qr1-pycache python3 -m py_compile ods/scripts/ms-qr1-ollama-http-proxy.py`
+- `PYTHONPYCACHEPREFIX=/tmp/ms-qr1-pycache python3 -m py_compile ods/scripts/ms-qr1-ollama-http-proxy.py ods/bin/ods-host-agent.py`
 - `(cd ods && MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config)`
 - `(cd ods && tmpdir="$(mktemp -d /tmp/generic-langfuse-compose.XXXXXX)" && cp extensions/services/langfuse/compose.yaml.disabled "$tmpdir/compose.yaml" && docker compose --env-file profiles/ms-qr1.env.example -f docker-compose.base.yml -f docker-compose.amd.yml -f extensions/services/ape/compose.yaml -f extensions/services/comfyui/compose.yaml -f extensions/services/comfyui/compose.amd.yaml -f extensions/services/embeddings/compose.yaml -f extensions/services/hermes/compose.yaml -f extensions/services/hermes-proxy/compose.yaml -f "$tmpdir/compose.yaml" -f extensions/services/litellm/compose.yaml -f extensions/services/n8n/compose.yaml -f extensions/services/perplexica/compose.yaml -f extensions/services/privacy-shield/compose.yaml -f extensions/services/qdrant/compose.yaml -f extensions/services/searxng/compose.yaml -f extensions/services/token-spy/compose.yaml -f extensions/services/tts/compose.yaml -f extensions/services/whisper/compose.yaml -f docker-compose.ms-qr1.yml config >/tmp/generic-langfuse-compose.rendered.yml)`
 - `(cd ods && python3 tests/contracts/test-network-exposure-contracts.py)`
 - `git diff --check`
-- `rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" AGENTS.md docs/ms/ODS-MS-CHANGELOG.md docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md ods/extensions/services/langfuse/README.md ods/extensions/services/langfuse/hooks/post_install.sh ods/extensions/services/n8n/README.md ods/lib/rootless-ownership.sh ods/scripts/ods-verify-quiescent-data-writers.sh ods/scripts/ms-qr1-acceptance.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-ollama-http-proxy.py ods/scripts/ms-qr1-prestart-provision.sh ods/tests/test-ms-qr1-helpers.sh`
+- `rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" AGENTS.md docs/ms/ODS-MS-CHANGELOG.md docs/ms/backlog/GENERIC-ODS-LIFECYCLE-HARDENING.md docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md ods/extensions/services/langfuse/README.md ods/extensions/services/langfuse/hooks/post_install.sh ods/extensions/services/n8n/README.md ods/lib/rootless-ownership.sh ods/scripts/ods-verify-quiescent-data-writers.sh ods/scripts/ms-qr1-acceptance.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-ollama-http-proxy.py ods/scripts/ms-qr1-prestart-provision.sh ods/tests/test-ms-qr1-helpers.sh`
 
 ### Rollback
 Repository rollback: revert the MSODS-0011 commit.

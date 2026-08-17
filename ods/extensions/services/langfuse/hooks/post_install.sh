@@ -48,23 +48,6 @@ fi
 POSTGRES_DIR="$INSTALL_DIR/data/langfuse/postgres"
 CLICKHOUSE_DIR="$INSTALL_DIR/data/langfuse/clickhouse"
 
-verify_quiescent_langfuse_writers() {
-    local gate="$INSTALL_DIR/scripts/ods-verify-quiescent-data-writers.sh"
-    if [[ ! -x "$gate" ]]; then
-        log "ERROR: missing quiescence verifier at $gate; refusing Langfuse ownership repair"
-        return 1
-    fi
-    # ADR: docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md.
-    # Callers may orchestrate writer stops, but the privileged mutation
-    # boundary must independently reject active writers for data/langfuse.
-    if ! "$gate" verify --install-dir "$INSTALL_DIR" --target data/langfuse; then
-        log "ERROR: Langfuse ownership repair requires quiescent data/langfuse writer containers"
-        return 1
-    fi
-}
-
-verify_quiescent_langfuse_writers
-
 ROOTLESS_LIB="$INSTALL_DIR/lib/rootless-ownership.sh"
 if [[ -f "$ROOTLESS_LIB" ]]; then
     # shellcheck source=../../../../lib/rootless-ownership.sh

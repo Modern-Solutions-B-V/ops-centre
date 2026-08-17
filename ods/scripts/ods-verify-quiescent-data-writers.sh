@@ -86,7 +86,6 @@ COMPOSE_JSON="$(render_compose_json)"
 WRITERS="$(COMPOSE_JSON="$COMPOSE_JSON" TARGETS_PAYLOAD="$TARGETS_PAYLOAD" INSTALL_DIR="$INSTALL_DIR" OUTPUT_KIND="$ACTION" DATA_DIR="${ODS_QUIESCENCE_DATA_DIR:-}" python3 - <<'PY'
 import json
 import os
-import sys
 from pathlib import Path
 
 data = json.loads(os.environ["COMPOSE_JSON"])
@@ -98,17 +97,17 @@ if not data_dir.is_absolute():
 data_dir = data_dir.resolve()
 target_lines = [line.strip() for line in os.environ["TARGETS_PAYLOAD"].splitlines() if line.strip()]
 output_kind = os.environ["OUTPUT_KIND"]
-targets: list[Path] = []
+targets = []
 for target in target_lines:
     path = Path(target)
     if not path.is_absolute():
         path = install_dir / path
     targets.append(path.resolve())
 
-def intersects(left: Path, right: Path) -> bool:
+def intersects(left, right):
     return left == right or left in right.parents or right in left.parents
 
-def string_volume_source(volume: str) -> tuple[str | None, bool]:
+def string_volume_source(volume):
     parts = volume.split(":")
     if len(parts) < 2:
         return None, False
@@ -117,7 +116,7 @@ def string_volume_source(volume: str) -> tuple[str | None, bool]:
         options.extend(item.strip() for item in part.split(","))
     return parts[0], "ro" in options
 
-writers: list[str] = []
+writers = []
 for service_name, service in sorted((data.get("services") or {}).items()):
     for volume in service.get("volumes") or []:
         source = None

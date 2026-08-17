@@ -103,11 +103,12 @@ All six services must be healthy before the web UI starts. ClickHouse has a 90-s
 - Verify `LANGFUSE_INIT_USER_EMAIL` and `LANGFUSE_INIT_USER_PASSWORD` are set in `.env`
 - Credentials are seeded on first start. Do not remove or repair
   `data/langfuse/` while containers that can write it are running. Use the
-  supported recovery lifecycle: derive the writer services for
-  `data/langfuse`, stop them, verify quiescence with
-  `scripts/ods-verify-quiescent-data-writers.sh verify --target data/langfuse`,
-  run the Langfuse setup/repair hook, then recreate the affected Langfuse
-  services. Direct data removal or `chown -R` is not a supported recovery path.
+  supported recovery lifecycle for managed deployments: stop services that can
+  write `data/langfuse`, verify they are stopped, run the Langfuse setup/repair
+  hook, then recreate the affected Langfuse services. MS QR1 operators must use
+  the QR1 deploy runbook for the exact writer derivation and verification
+  commands. Direct data removal or `chown -R` while writer containers are
+  running is not a supported recovery path.
 
 **No traces appearing in the UI:**
 - Confirm `LANGFUSE_ENABLED=true` in `.env`

@@ -19,27 +19,30 @@ alone is the wrong security boundary for privileged repair.
 
 ## Decision
 
-No privileged filesystem mutation may occur against an MS Ops Centre data path
-while a container capable of writing that path is running.
+Binding scope for this decision: MS Ops Centre QR1 deployment, repair and
+acceptance paths.
+
+Within that QR1 scope, no privileged filesystem mutation may occur against an
+MS Ops Centre data path while a container capable of writing that path is
+running.
 
 Privileged initialization or repair must occur against quiescent state.
 Runtime validation must be read-only. Post-start refresh operations must not
 silently introduce privileged filesystem repair.
 
-Quiescence must be enforced by orchestration and independently at each
-MS-controlled privileged mutation boundary. A supported alternate caller, such
-as host-agent invoking a setup hook directly, must not be able to bypass the
-gate by skipping the normal runbook sequence.
-
-The quiescence invariant is MS security policy. Orchestration may be
-deployment-specific, but the enforcement primitive used by shared ODS lifecycle
-hooks must be deployment-neutral: it accepts target persistent path(s), derives
-writers from the active Compose model, and must not depend on QR1-only compose
-flags, profiles or disabled template filenames.
+Broader principle: quiescence before privileged mutation is the preferred MS
+security pattern. Non-claim: this QR1 decision does not assert that every
+generic or upstream ODS install, extension setup, rootless repair, purge or
+uninstall path currently implements the pattern. Generic gaps discovered while
+reviewing this PR are tracked separately and must not be treated as QR1
+acceptance blockers unless QR1 invokes that path.
 
 For QR1, the quiescence gate is derived from rendered Compose writable bind
 mounts that intersect the persistent data trees being repaired, including
-`data/n8n`, `data/persona` and `data/langfuse`.
+`data/n8n`, `data/persona` and `data/langfuse`. QR1 mutation-boundary checks
+must use the canonical complete QR1 Compose model; caller-supplied overrides
+must not be able to remove base services or otherwise scope down writer
+discovery.
 
 ## Consequences
 
@@ -53,11 +56,12 @@ mounts that intersect the persistent data trees being repaired, including
   lifecycle phase.
 - Operators take on slightly more sequencing in exchange for a simpler trust
   boundary.
-- Runbooks must present one authoritative repair path: stop derived writers,
+- The QR1 runbook must present one authoritative repair path: stop derived writers,
   verify quiescence, then run the reviewed helper or hook. Manual chown/chmod/rm
   recovery against container-writable MS data must not bypass that sequence.
-- Privileged helpers and hooks must fail closed themselves if quiescence has
-  not been proven, even when a caller normally performs the same check first.
+- Generic ODS lifecycle hardening found during review requires separate design
+  and orchestration before shared dashboard-driven flows can enforce the same
+  pattern.
 
 ## Rejected Approach
 
@@ -72,7 +76,8 @@ is difficult to audit and easy to regress.
 
 ## Future Rule
 
-This decision applies beyond n8n and Hermes. Any future MS Ops Centre component
-requiring privileged mutation of container-writable persistent state must follow
-the same quiescent-state model unless explicitly superseded by another reviewed
-MS decision.
+This QR1 decision applies beyond n8n and Hermes inside QR1-owned deployment,
+repair and acceptance paths. Any future MS Ops Centre QR component requiring
+privileged mutation of container-writable persistent state must follow the same
+quiescent-state model unless explicitly superseded by another reviewed MS
+decision.
