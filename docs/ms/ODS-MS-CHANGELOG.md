@@ -8,6 +8,97 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-17 — Correct QR1 acceptance false positives for Tailscale Serve and Hermes auth redirect
+
+### Change ID
+`MSODS-0013`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`fix/qr1-acceptance-tailscale-hermes` / PR pending
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`EXTEND`
+
+### Files changed
+- `ods/scripts/ms-qr1-acceptance.sh`
+- `ods/tests/test-ms-qr1-helpers.sh`
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Live EVO-X3 qualification reached the blocking QR1 acceptance gate after:
+
+- HTTP Ollama bridge replacement passed.
+- Container default-Host Ollama routing through `ms-qr1-host:11434` passed for
+  `litellm`, `perplexica`, `privacy-shield` and `token-spy`.
+- UFW and listener architecture passed by direct inspection.
+- Full QR1 stack was healthy.
+- Hermes post-start refresh passed.
+- Hermes was healthy and host port `9119` remained unbound.
+
+The first acceptance execution reported 13 checks passing and 2 blocking
+false-positive assumptions:
+
+1. Approved host Tailscale Serve listeners on tailnet IPv4/IPv6 port `11434`
+   were classified as non-gateway QR1 Ollama bridge binds even though
+   `tailscale serve status` showed they forward to `tcp://127.0.0.1:11434`.
+2. Hermes proxy unauthenticated `/api/pty` returned the documented Caddy auth
+   redirect `303 Location: /auth/required`, while acceptance only allowed
+   direct `401`, `403` or `404`.
+
+### Behavior before
+`check_live_listeners_loopback_and_bridge_no_wildcard` treated every `:11434`
+listener other than loopback or discovered Docker gateway address(es) as a QR1
+bridge violation. `check_hermes_tui` rejected any unauthenticated Hermes proxy
+response outside `401`, `403` or `404`.
+
+### Behavior after
+The listener check still rejects wildcard `0.0.0.0:11434` / `[::]:11434` and
+arbitrary LAN or non-gateway listeners. It now exempts an extra `:11434`
+listener only when its exact address is assigned to `tailscale0` and
+`tailscale serve status` shows TCP `11434` for that tailnet address forwarding
+to `tcp://127.0.0.1:11434`. If Tailscale Serve is absent or cannot prove the
+mapping, no extra listener is exempted.
+
+The Hermes check still requires host port `9119` to be unbound and still fails
+unauthenticated `200`. It now accepts `303` only with exact
+`Location: /auth/required`, matching the reviewed Caddy auth contract, and does
+not follow redirects.
+
+### Security / privacy impact
+Neutral to positive. This is an acceptance-contract correction only. It does
+not modify the Ollama HTTP proxy, Ollama binding, Tailscale Serve state,
+Caddyfile, Hermes configuration, Compose architecture, UFW or persistent-state
+lifecycle. The Tailscale exemption is fail-closed and cannot become a generic
+process-name or arbitrary `11434` listener bypass.
+
+### Qualification status
+Local/static validation passed for this corrective branch. EVO-X3 hardware
+qualification remains **PENDING** until the corrected blocking acceptance gate
+itself returns zero. EVO-X3 was not modified by this PR.
+
+### Validation performed
+- `bash ods/tests/test-ms-qr1-helpers.sh`
+- `for f in ods/scripts/ms-qr1-acceptance.sh ods/tests/test-ms-qr1-helpers.sh; do bash -n "$f"; done`
+- `(cd ods && PYTHONPYCACHEPREFIX=/tmp/ms-qr1-lint-pycache make lint)`
+- `(cd ods && MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config >/tmp/qr1-compose.rendered.yml)`
+- `(cd ods && python3 tests/contracts/test-network-exposure-contracts.py)`
+- `git diff --check`
+- `rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" docs/ms/ODS-MS-CHANGELOG.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md ods/scripts/ms-qr1-acceptance.sh ods/tests/test-ms-qr1-helpers.sh`
+
+### Rollback
+Repository rollback: revert the MSODS-0013 commit. Host rollback is not
+required because this change only adjusts acceptance checks and documentation.
+
+---
+
 ## 2026-08-17 — Fix QR1 Ollama bridge systemd WorkingDirectory rendering
 
 ### Change ID

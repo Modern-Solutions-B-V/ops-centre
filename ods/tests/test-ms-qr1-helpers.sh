@@ -265,8 +265,31 @@ if [[ "$*" == "-o -4 addr show" ]]; then
   cat "$FIXTURE_DIR/ip-addr.txt"
   exit 0
 fi
+if [[ "$*" == "-o addr show dev tailscale0" ]]; then
+  if [[ "${TAILSCALE_ADDR_FAIL:-0}" == "1" ]]; then
+    echo "fixture tailscale0 addr failure" >&2
+    exit 58
+  fi
+  cat "$FIXTURE_DIR/tailscale0-addr.txt"
+  exit 0
+fi
 echo "unexpected ip command: $*" >&2
 exit 49
+SH
+
+cat > "$tmpdir/tailscale" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == "serve status" ]]; then
+  if [[ "${TAILSCALE_SERVE_FAIL:-0}" == "1" ]]; then
+    echo "fixture tailscale serve failure" >&2
+    exit 59
+  fi
+  cat "$FIXTURE_DIR/tailscale-serve-status.txt"
+  exit 0
+fi
+echo "unexpected tailscale command: $*" >&2
+exit 60
 SH
 
 cat > "$tmpdir/ss" <<'SH'
@@ -287,11 +310,28 @@ SH
 cat > "$tmpdir/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+emit_response() {
+  case "${CURL_MODE:-401}" in
+    303-auth) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-other) printf 'HTTP/1.1 303 See Other\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
+    303-missing) printf 'HTTP/1.1 303 See Other\r\n\r\nHTTP_STATUS:303' ;;
+    401) printf 'HTTP/1.1 401 Unauthorized\r\n\r\nHTTP_STATUS:401' ;;
+    403) printf 'HTTP/1.1 403 Forbidden\r\n\r\nHTTP_STATUS:403' ;;
+    404) printf 'HTTP/1.1 404 Not Found\r\n\r\nHTTP_STATUS:404' ;;
+    200) printf 'HTTP/1.1 200 OK\r\n\r\nHTTP_STATUS:200' ;;
+    transport) exit 7 ;;
+    *) printf 'HTTP/1.1 %s Fixture\r\n\r\nHTTP_STATUS:%s' "$CURL_MODE" "$CURL_MODE" ;;
+  esac
+}
 if [[ "$*" == *"127.0.0.1:9119/api/status"* ]]; then
   if [[ "${CURL_MODE:-401}" == "transport" ]]; then
     exit 7
   fi
   printf '{"ok":true}\n'
+  exit 0
+fi
+if [[ "$*" == *" -D - "* || "$*" == *"-D -"* ]]; then
+  emit_response
   exit 0
 fi
 case "${CURL_MODE:-401}" in
@@ -303,7 +343,7 @@ case "${CURL_MODE:-401}" in
 esac
 SH
 
-chmod +x "$tmpdir/docker" "$tmpdir/sudo" "$tmpdir/systemctl" "$tmpdir/chown" "$tmpdir/uname" "$tmpdir/ufw" "$tmpdir/ip" "$tmpdir/ss" "$tmpdir/curl"
+chmod +x "$tmpdir/docker" "$tmpdir/sudo" "$tmpdir/systemctl" "$tmpdir/chown" "$tmpdir/uname" "$tmpdir/ufw" "$tmpdir/ip" "$tmpdir/tailscale" "$tmpdir/ss" "$tmpdir/curl"
 
 cat > "$tmpdir/compose-config.json" <<'JSON'
 {
@@ -376,6 +416,16 @@ cat > "$tmpdir/ip-addr.txt" <<'EOF'
 7: br-a inet 172.31.0.1/16 brd 172.31.255.255 scope global br-a
 8: br-b inet 172.20.0.1/16 brd 172.20.255.255 scope global br-b
 9: br-internal inet 172.29.0.1/16 brd 172.29.255.255 scope global br-internal
+EOF
+cat > "$tmpdir/tailscale0-addr.txt" <<'EOF'
+10: tailscale0    inet 100.116.5.69/32 scope global tailscale0
+10: tailscale0    inet6 fd7a:115c:a1e0::a801:5c2/128 scope global
+EOF
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+tcp://evox3.tailfc79e6.ts.net:11434 (tailnet only)
+tcp://100.116.5.69:11434
+tcp://[fd7a:115c:a1e0::a801:5c2]:11434
+--> tcp://127.0.0.1:11434
 EOF
 
 bridge_libexec="$tmpdir/libexec/ms-qr1"
@@ -1065,6 +1115,51 @@ LISTEN 0      4096   172.31.0.1:7710     0.0.0.0:*         users:(("python3",pid
 LISTEN 0      4096   127.0.0.1:4000      0.0.0.0:*         users:(("docker-proxy",pid=14,fd=3))
 EOF
 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
+cat > "$tmpdir/ss-state.txt" <<'EOF'
+State  Recv-Q Send-Q Local Address:Port                   Peer Address:Port Process
+LISTEN 0      4096   127.0.0.1:11434                      0.0.0.0:*         users:(("ollama",pid=10,fd=3))
+LISTEN 0      4096   172.31.0.1:11434                     0.0.0.0:*         users:(("python3",pid=11,fd=3))
+LISTEN 0      4096   172.20.0.1:11434                     0.0.0.0:*         users:(("python3",pid=12,fd=3))
+LISTEN 0      4096   100.116.5.69:11434                   0.0.0.0:*         users:(("tailscaled",pid=15,fd=3))
+LISTEN 0      4096   [fd7a:115c:a1e0::a801:5c2]:11434     [::]:*            users:(("tailscaled",pid=16,fd=3))
+LISTEN 0      4096   127.0.0.1:4000                       0.0.0.0:*         users:(("docker-proxy",pid=14,fd=3))
+EOF
+"${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+tcp://evox3.tailfc79e6.ts.net:443 (tailnet only)
+--> tcp://127.0.0.1:3001
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-tail-no-serve.out" 2> "$tmpdir/ss-tail-no-serve.err"; then
+  echo "listener acceptance should fail when Tailscale IP lacks approved Serve 11434 mapping" >&2
+  exit 1
+fi
+assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-no-serve.out"
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+tcp://100.116.5.69:11434
+--> tcp://127.0.0.1:3001
+tcp://[fd7a:115c:a1e0::a801:5c2]:11434
+--> tcp://127.0.0.1:3001
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-tail-wrong-target.out" 2> "$tmpdir/ss-tail-wrong-target.err"; then
+  echo "listener acceptance should fail when Tailscale Serve 11434 does not forward to Ollama loopback" >&2
+  exit 1
+fi
+assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-wrong-target.out"
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+tcp://evox3.tailfc79e6.ts.net:11434 (tailnet only)
+tcp://100.116.5.69:11434
+tcp://[fd7a:115c:a1e0::a801:5c2]:11434
+--> tcp://127.0.0.1:11434
+EOF
+cat > "$tmpdir/ss-state.txt" <<'EOF'
+State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
+LISTEN 0      4096   0.0.0.0:11434      0.0.0.0:*         users:(("python3",pid=17,fd=3))
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-wildcard.out" 2> "$tmpdir/ss-wildcard.err"; then
+  echo "listener acceptance should fail on wildcard Ollama bridge binds" >&2
+  exit 1
+fi
+assert_contains 'wildcard QR1 bridge bind' "$tmpdir/ss-wildcard.out"
 if SS_FAIL=1 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-fail.out" 2> "$tmpdir/ss-fail.err"; then
   echo "listener acceptance should fail when ss fails" >&2
   exit 1
@@ -1084,6 +1179,19 @@ assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-bad.out"
 cat > "$tmpdir/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$*" == *" -D - "* || "$*" == *"-D -"* ]]; then
+  case "${CURL_MODE:-401}" in
+    303-auth) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-other) printf 'HTTP/1.1 303 See Other\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
+    401) printf 'HTTP/1.1 401 Unauthorized\r\n\r\nHTTP_STATUS:401' ;;
+    403) printf 'HTTP/1.1 403 Forbidden\r\n\r\nHTTP_STATUS:403' ;;
+    404) printf 'HTTP/1.1 404 Not Found\r\n\r\nHTTP_STATUS:404' ;;
+    200) printf 'HTTP/1.1 200 OK\r\n\r\nHTTP_STATUS:200' ;;
+    transport) exit 7 ;;
+    *) printf 'HTTP/1.1 %s Fixture\r\n\r\nHTTP_STATUS:%s' "$CURL_MODE" "$CURL_MODE" ;;
+  esac
+  exit 0
+fi
 case "${CURL_MODE:-401}" in
   401) printf '401' ;;
   403) printf '403' ;;
@@ -1093,6 +1201,33 @@ case "${CURL_MODE:-401}" in
 esac
 SH
 chmod +x "$tmpdir/curl"
+cat > "$tmpdir/ss-state.txt" <<'EOF'
+State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
+LISTEN 0      4096   127.0.0.1:9120      0.0.0.0:*         users:(("docker-proxy",pid=18,fd=3))
+EOF
+CURL_MODE=303-auth "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
+CURL_MODE=401 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
+CURL_MODE=403 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
+CURL_MODE=404 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
+if CURL_MODE=303-other "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-bad.out" 2> "$tmpdir/hermes-redirect-bad.err"; then
+  echo "Hermes TUI acceptance should fail on arbitrary 303 redirects" >&2
+  exit 1
+fi
+assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-bad.err"
+if CURL_MODE=200 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-200.out" 2> "$tmpdir/hermes-200.err"; then
+  echo "Hermes TUI acceptance should fail when unauthenticated PTY returns 200" >&2
+  exit 1
+fi
+assert_contains 'unexpected HTTP status' "$tmpdir/hermes-200.err"
+cat > "$tmpdir/ss-state.txt" <<'EOF'
+State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
+LISTEN 0      4096   127.0.0.1:9119      0.0.0.0:*         users:(("docker-proxy",pid=19,fd=3))
+EOF
+if CURL_MODE=303-auth "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-9119.out" 2> "$tmpdir/hermes-9119.err"; then
+  echo "Hermes TUI acceptance should fail when host 9119 is bound" >&2
+  exit 1
+fi
+assert_contains 'host port 9119 is bound' "$tmpdir/hermes-9119.err"
 CURL_MODE=401 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; expect_http_status http://example.invalid 401 403'
 CURL_MODE=403 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; expect_http_status http://example.invalid 401 403'
 CURL_MODE=404 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; expect_http_status http://example.invalid 401 403 404'

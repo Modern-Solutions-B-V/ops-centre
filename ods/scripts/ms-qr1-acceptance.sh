@@ -40,6 +40,11 @@ http_status() {
   curl -sS -o /dev/null -w '%{http_code}' "$url"
 }
 
+http_status_and_location() {
+  local url="$1"
+  curl -sS -o /dev/null -D - -w 'HTTP_STATUS:%{http_code}' "$url"
+}
+
 expect_http_status() {
   local url="$1"
   shift
@@ -54,6 +59,32 @@ expect_http_status() {
   done
   echo "unexpected HTTP status for $url: $status; expected one of: $*" >&2
   return 1
+}
+
+expect_http_status_or_auth_redirect() {
+  local url="$1" response status location
+  if ! response="$(http_status_and_location "$url")"; then
+    echo "transport failure for $url" >&2
+    return 1
+  fi
+  status="$(printf '%s\n' "$response" | awk -F: '/^HTTP_STATUS:/ {print $2}' | tail -1 | tr -d '\r')"
+  case "$status" in
+    401|403|404)
+      return 0
+      ;;
+    303)
+      location="$(printf '%s\n' "$response" | awk 'BEGIN{IGNORECASE=1} /^Location:/ {sub(/^[^:]*:[[:space:]]*/, ""); gsub(/\r/, ""); print; exit}')"
+      if [[ "$location" == "/auth/required" ]]; then
+        return 0
+      fi
+      echo "unexpected HTTP redirect for $url: 303 Location: ${location:-<missing>}; expected /auth/required" >&2
+      return 1
+      ;;
+    *)
+      echo "unexpected HTTP status for $url: ${status:-<missing>}; expected 401, 403, 404, or 303 Location: /auth/required" >&2
+      return 1
+      ;;
+  esac
 }
 
 check_no_fallbacks() {
@@ -168,43 +199,90 @@ PY
 
 check_live_listeners_loopback_and_bridge_no_wildcard() {
   require ss
-  local expected_bridge_addrs listener_snapshot
+  local expected_bridge_addrs listener_snapshot approved_tailscale_serve_addrs
   expected_bridge_addrs="$(scripts/ms-qr1-ollama-bridge.sh expected-listeners)"
   listener_snapshot="$(ss -tlnp)" || {
     echo "ss listener snapshot failed" >&2
     return 1
   }
-  EXPECTED_BRIDGE_ADDRS="$expected_bridge_addrs" awk '
-    BEGIN {
-      split(ENVIRON["EXPECTED_BRIDGE_ADDRS"], expected, "\n")
-      for (idx in expected) {
-        if (expected[idx] != "") {
-          bridge_addr[expected[idx]]=1
-        }
-      }
-    }
-    /:(3000|3001|3002|3004|3005|3006|4000|5678|6333|6334|7890|8085|8090|8188|8880|8888|9000|9120) / {
-      if ($4 !~ /^127\.0\.0\.1:/ && $4 !~ /^\[::1\]:/) {
-        print "non-loopback QR1 service bind: " $0
-        bad=1
-      }
-    }
-    /:(11434|7710) / {
-      if ($4 ~ /^0\.0\.0\.0:/ || $4 ~ /^\[::\]:/) {
-        print "wildcard QR1 bridge bind: " $0
-        bad=1
-      }
-    }
-    /:11434 / {
-      addr=$4
-      sub(/:[0-9]+$/, "", addr)
-      if (addr != "127.0.0.1" && !(addr in bridge_addr)) {
-        print "non-gateway QR1 Ollama bridge bind: " $0
-        bad=1
-      }
-    }
-    END { exit bad ? 1 : 0 }
-  ' <<<"$listener_snapshot"
+  approved_tailscale_serve_addrs="$(approved_tailscale_serve_11434_addrs || true)"
+  EXPECTED_BRIDGE_ADDRS="$expected_bridge_addrs" APPROVED_TAILSCALE_SERVE_ADDRS="$approved_tailscale_serve_addrs" LISTENER_SNAPSHOT="$listener_snapshot" python3 - <<'PY'
+import os
+import re
+import sys
+
+expected_bridge = set(filter(None, os.environ["EXPECTED_BRIDGE_ADDRS"].splitlines()))
+approved_tail = set(filter(None, os.environ["APPROVED_TAILSCALE_SERVE_ADDRS"].splitlines()))
+service_ports = {
+    "3000", "3001", "3002", "3004", "3005", "3006", "4000", "5678",
+    "6333", "6334", "7890", "8085", "8090", "8188", "8880", "8888",
+    "9000", "9120",
+}
+bad = False
+
+def split_addr_port(local):
+    if local.startswith("["):
+        match = re.match(r"^\[([^\]]+)\]:(\d+)$", local)
+        if match:
+            return match.group(1), match.group(2)
+    if ":" in local:
+        addr, port = local.rsplit(":", 1)
+        return addr, port
+    return local, ""
+
+for line in os.environ["LISTENER_SNAPSHOT"].splitlines():
+    fields = line.split()
+    if len(fields) < 4 or fields[0] == "State":
+        continue
+    addr, port = split_addr_port(fields[3])
+    if port in service_ports and addr not in {"127.0.0.1", "::1"}:
+        print(f"non-loopback QR1 service bind: {line}")
+        bad = True
+    if port in {"11434", "7710"} and addr in {"0.0.0.0", "::"}:
+        print(f"wildcard QR1 bridge bind: {line}")
+        bad = True
+    if port == "11434" and addr != "127.0.0.1" and addr not in expected_bridge and addr not in approved_tail:
+        print(f"non-gateway QR1 Ollama bridge bind: {line}")
+        bad = True
+
+sys.exit(1 if bad else 0)
+PY
+}
+
+approved_tailscale_serve_11434_addrs() {
+  command -v ip >/dev/null || return 0
+  command -v tailscale >/dev/null || return 0
+  local tailscale_addrs serve_status
+  tailscale_addrs="$(ip -o addr show dev tailscale0 2>/dev/null)" || return 1
+  serve_status="$(tailscale serve status 2>/dev/null)" || return 1
+  TAILSCALE_ADDRS="$tailscale_addrs" TAILSCALE_SERVE_STATUS="$serve_status" python3 - <<'PY'
+import ipaddress
+import os
+import re
+
+assigned = set()
+for line in os.environ["TAILSCALE_ADDRS"].splitlines():
+    parts = line.split()
+    for idx, part in enumerate(parts):
+        if part in {"inet", "inet6"} and idx + 1 < len(parts):
+            assigned.add(str(ipaddress.ip_interface(parts[idx + 1]).ip))
+
+lines = os.environ["TAILSCALE_SERVE_STATUS"].splitlines()
+approved = set()
+for idx, line in enumerate(lines):
+    match = re.search(r"tcp://(?:\[([^\]]+)\]|([^:\s]+)):11434(?:\s|$)", line)
+    if not match:
+        continue
+    addr = match.group(1) or match.group(2)
+    if addr not in assigned:
+        continue
+    block = "\n".join(lines[idx:idx + 4])
+    if "tcp://127.0.0.1:11434" in block:
+        approved.add(addr)
+
+for addr in sorted(approved):
+    print(addr)
+PY
 }
 
 check_hermes_tui() {
@@ -213,7 +291,7 @@ check_hermes_tui() {
     echo "host port 9119 is bound" >&2
     return 1
   fi
-  expect_http_status "$HERMES_URL/api/pty" 401 403 404
+  expect_http_status_or_auth_redirect "$HERMES_URL/api/pty"
 }
 
 check_qdrant_auth() {

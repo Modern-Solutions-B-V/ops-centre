@@ -530,7 +530,7 @@ bash tests/test-ms-qr1-helpers.sh
 python3 tests/contracts/test-network-exposure-contracts.py
 ```
 
-Expected: acceptance checks pass. Qdrant unauthenticated requests must be rejected. Hermes host port `9119` must be unbound. Local-only LiteLLM routes must have no fallback. Rendered QR1 services must match the allow-list/exclusion policy. Every rendered published QR1 service port must bind loopback. Host-agent nmcli endpoints must reject unauthenticated requests on the resolved host-agent bind address.
+Expected: acceptance checks pass. Qdrant unauthenticated requests must be rejected. Hermes host port `9119` must be unbound; unauthenticated Hermes PTY access must return direct `401`/`403`/`404` or the approved Caddy auth redirect `303 Location: /auth/required`, never `200`. Local-only LiteLLM routes must have no fallback. Rendered QR1 services must match the allow-list/exclusion policy. Every rendered published QR1 service port must bind loopback. Host-agent nmcli endpoints must reject unauthenticated requests on the resolved host-agent bind address. Host Tailscale Serve listeners on tailnet port `11434` are allowed only when the listener address belongs to `tailscale0` and `tailscale serve status` proves TCP `11434` forwards to `tcp://127.0.0.1:11434`; arbitrary LAN/non-gateway `11434` listeners still fail.
 The pre-start provisioning check must confirm `data/persona/SOUL.md` is a
 regular file and `data/n8n` is owned by the effective rendered n8n UID/GID.
 This check is read-only; any ownership, permission or persona repair requires
