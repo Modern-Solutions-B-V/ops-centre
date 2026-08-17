@@ -194,8 +194,7 @@ if [[ "$ACTION" == "serve" ]]; then
 fi
 
 render_unit() {
-  local quoted_install_dir quoted_exec
-  quoted_install_dir="$(systemd_quote "$INSTALL_DIR")"
+  local quoted_exec
   quoted_exec="$(systemd_quote "$INSTALLED_BRIDGE")"
   cat <<UNIT
 [Unit]
@@ -205,7 +204,7 @@ Wants=docker.service
 
 [Service]
 Type=simple
-WorkingDirectory=$quoted_install_dir
+WorkingDirectory=$INSTALL_DIR
 ExecStart=$quoted_exec serve
 Environment="MS_QR1_OLLAMA_MAX_BODY_BYTES=268435456"
 Environment="MS_QR1_OLLAMA_UPSTREAM_TIMEOUT=300"

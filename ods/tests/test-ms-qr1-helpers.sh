@@ -380,6 +380,12 @@ EOF
 
 bridge_libexec="$tmpdir/libexec/ms-qr1"
 env_prefix=(env FIXTURE_DIR="$tmpdir" MS_QR1_OLLAMA_LIBEXEC_DIR="$bridge_libexec" PATH="$tmpdir:$PATH")
+mkdir -p "$bridge_libexec"
+cat > "$bridge_libexec/ms-qr1-ollama-bridge.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$bridge_libexec/ms-qr1-ollama-bridge.sh"
 
 "${env_prefix[@]}" scripts/ms-qr1-ufw-docker-rules.sh plan > "$tmpdir/ufw-plan.out"
 assert_contains "172.31.0.0/16 -> 172.31.0.1:11434/tcp" "$tmpdir/ufw-plan.out"
@@ -461,7 +467,8 @@ EOF
 
 "${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh render-unit > "$tmpdir/bridge.unit"
 assert_contains 'Description=MS QR1 Ollama Docker HTTP bridge' "$tmpdir/bridge.unit"
-assert_contains "WorkingDirectory=\"$PWD\"" "$tmpdir/bridge.unit"
+assert_contains "WorkingDirectory=$PWD" "$tmpdir/bridge.unit"
+assert_not_contains "WorkingDirectory=\"$PWD\"" "$tmpdir/bridge.unit"
 assert_contains "ExecStart=\"$bridge_libexec/ms-qr1-ollama-bridge.sh\" serve" "$tmpdir/bridge.unit"
 assert_not_contains "ExecStart=\"$PWD/scripts/ms-qr1-ollama-bridge.sh\" serve" "$tmpdir/bridge.unit"
 assert_contains 'Environment="MS_QR1_OLLAMA_MAX_BODY_BYTES=268435456"' "$tmpdir/bridge.unit"
@@ -473,6 +480,22 @@ assert_not_contains 'MS_QR1_OLLAMA_BRIDGE_ADDRS=' "$tmpdir/bridge.unit"
 assert_not_contains 'socat' "$tmpdir/bridge.unit"
 assert_not_contains '0.0.0.0' "$tmpdir/bridge.unit"
 assert_not_contains '172.29.0.1' "$tmpdir/bridge.unit"
+python3 - "$tmpdir/bridge.unit" <<'PY'
+from pathlib import Path
+import sys
+
+unit = Path(sys.argv[1]).read_text(encoding="utf-8")
+line = next(item for item in unit.splitlines() if item.startswith("WorkingDirectory="))
+value = line.split("=", 1)[1]
+if not value.startswith("/"):
+    raise SystemExit(f"WorkingDirectory is not absolute: {line}")
+if value.startswith('"') or value.endswith('"'):
+    raise SystemExit(f"WorkingDirectory has literal wrapping quotes: {line}")
+PY
+if [[ "$(uname -s)" == "Linux" ]] && command -v systemd-analyze >/dev/null 2>&1; then
+  cp "$tmpdir/bridge.unit" "$tmpdir/ms-qr1-ollama-bridge.rendered.service"
+  systemd-analyze verify "$tmpdir/ms-qr1-ollama-bridge.rendered.service"
+fi
 
 "${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh expected-listeners > "$tmpdir/bridge.listeners"
 assert_contains '172.20.0.1' "$tmpdir/bridge.listeners"
@@ -503,6 +526,8 @@ if "--max-body-bytes" not in text or "--upstream-timeout" not in text:
 PY
 
 MS_QR1_OLLAMA_UNIT_PATH="$tmpdir/ms-qr1-ollama-bridge.service" "${env_prefix[@]}" scripts/ms-qr1-ollama-bridge.sh install > "$tmpdir/bridge.install"
+assert_contains "WorkingDirectory=$PWD" "$tmpdir/ms-qr1-ollama-bridge.service"
+assert_not_contains "WorkingDirectory=\"$PWD\"" "$tmpdir/ms-qr1-ollama-bridge.service"
 assert_contains "ExecStart=\"$bridge_libexec/ms-qr1-ollama-bridge.sh\" serve" "$tmpdir/ms-qr1-ollama-bridge.service"
 assert_not_contains "ExecStart=\"$PWD/scripts/ms-qr1-ollama-bridge.sh\" serve" "$tmpdir/ms-qr1-ollama-bridge.service"
 [[ -x "$bridge_libexec/ms-qr1-ollama-bridge.sh" ]] || {
