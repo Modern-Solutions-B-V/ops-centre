@@ -177,6 +177,16 @@ printf '%s\n' "$*" >> "$FIXTURE_DIR/chown.log"
 exit 0
 SH
 
+cat > "$tmpdir/uname" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-s" || "$#" -eq 0 ]]; then
+  echo "Linux"
+else
+  echo "unexpected uname command: $*" >&2
+  exit 57
+fi
+SH
+
 cat > "$tmpdir/ufw" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -261,7 +271,7 @@ case "${CURL_MODE:-401}" in
 esac
 SH
 
-chmod +x "$tmpdir/docker" "$tmpdir/sudo" "$tmpdir/systemctl" "$tmpdir/chown" "$tmpdir/ufw" "$tmpdir/ip" "$tmpdir/ss" "$tmpdir/curl"
+chmod +x "$tmpdir/docker" "$tmpdir/sudo" "$tmpdir/systemctl" "$tmpdir/chown" "$tmpdir/uname" "$tmpdir/ufw" "$tmpdir/ip" "$tmpdir/ss" "$tmpdir/curl"
 
 cat > "$tmpdir/compose-config.json" <<'JSON'
 {
@@ -597,6 +607,52 @@ if DOCKER_PS_NAMES="ods-dashboard-api" FIXTURE_N8N_USER="$fixture_uid:$fixture_g
   exit 1
 fi
 assert_contains 'ods-dashboard-api' "$tmpdir/verify-gate.err"
+rm -f "$tmpdir/chown.log"
+if DOCKER_PS_NAMES="ods-dashboard-api" ODS_ASSUME_ROOTLESS=0 "${env_prefix[@]}" bash extensions/services/langfuse/hooks/post_install.sh "$PWD" amd > "$tmpdir/langfuse-hook-active.out" 2> "$tmpdir/langfuse-hook-active.err"; then
+  echo "Langfuse post_install hook should fail when a data/langfuse writer is running" >&2
+  exit 1
+fi
+assert_contains 'requires quiescent data/langfuse writer containers' "$tmpdir/langfuse-hook-active.err"
+[[ ! -e "$tmpdir/chown.log" ]] || {
+  echo "Langfuse hook mutated ownership after failed quiescence" >&2
+  cat "$tmpdir/chown.log" >&2
+  exit 1
+}
+if DOCKER_PS_NAMES="ods-dashboard-api" ODS_ASSUME_ROOTLESS=0 "${env_prefix[@]}" python3 - <<'PY' > "$tmpdir/host-agent-langfuse-active.out" 2> "$tmpdir/host-agent-langfuse-active.err"
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("ods_host_agent", "bin/ods-host-agent.py")
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+mod.INSTALL_DIR = Path.cwd()
+mod.DATA_DIR = Path.cwd() / "data"
+mod.GPU_BACKEND = "amd"
+mod._resolve_hook = lambda ext_dir, hook_name: Path("extensions/services/langfuse/hooks/post_install.sh").resolve()
+mod._read_manifest = lambda ext_dir: {"service": {"port": 3006}}
+ok, msg = mod._run_post_install_hook("langfuse", Path("extensions/services/langfuse"))
+if ok:
+    raise SystemExit("host-agent-triggered Langfuse post_install unexpectedly succeeded")
+if "quiescent" not in msg:
+    raise SystemExit(f"host-agent error did not surface quiescence failure: {msg!r}")
+PY
+then
+  :
+else
+  echo "host-agent-triggered Langfuse active-writer fixture failed unexpectedly" >&2
+  cat "$tmpdir/host-agent-langfuse-active.out" >&2
+  cat "$tmpdir/host-agent-langfuse-active.err" >&2
+  exit 1
+fi
+[[ ! -e "$tmpdir/chown.log" ]] || {
+  echo "host-agent-triggered Langfuse setup mutated ownership after failed quiescence" >&2
+  cat "$tmpdir/chown.log" >&2
+  exit 1
+}
+ODS_ASSUME_ROOTLESS=0 "${env_prefix[@]}" bash extensions/services/langfuse/hooks/post_install.sh "$PWD" amd > "$tmpdir/langfuse-hook-quiescent.out" 2> "$tmpdir/langfuse-hook-quiescent.err"
+assert_contains '70:70' "$tmpdir/chown.log"
+assert_contains '101:101' "$tmpdir/chown.log"
 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/prestart-provision.out"
 assert_contains 'QR1 pre-start provisioning complete' "$tmpdir/prestart-provision.out"
 [[ -f "$fixture_data/persona/SOUL.md" ]] || {
@@ -1031,10 +1087,14 @@ assert_contains 'scripts/ms-qr1-prestart-provision.sh verify-quiescent' ../docs/
 assert_contains 'scripts/ms-qr1-prestart-provision.sh poststart-refresh' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'quiescent container-writable state' scripts/ms-qr1-prestart-provision.sh
+assert_contains 'MS_QR1_QUIESCENCE_TARGETS="data/langfuse"' extensions/services/langfuse/hooks/post_install.sh
+assert_contains 'Langfuse ownership repair requires quiescent data/langfuse writer containers' extensions/services/langfuse/hooks/post_install.sh
 assert_contains 'mktemp "$PERSONA_DIR/.SOUL.md.tmp.XXXXXX"' scripts/ms-qr1-prestart-provision.sh
 assert_not_contains '127.0.0.1:9119/api/status' scripts/ms-qr1-prestart-provision.sh
 assert_not_contains '127.0.0.1:9119/api/status' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_not_contains 'stop n8n hermes hermes-proxy dashboard-api || true' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_not_contains 'sudo rm -rf data/langfuse/postgres data/langfuse/clickhouse' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_not_contains 'remove that directory and rerun' ../docs/ms/ODS-MS-CHANGELOG.md
 assert_contains 'Runtime acceptance checks' ../AGENTS.md
 assert_contains 'up -d --no-deps --force-recreate hermes' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --force-recreate' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md

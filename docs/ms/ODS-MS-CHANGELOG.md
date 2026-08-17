@@ -125,6 +125,14 @@ MS data: derive writer services, stop them through Compose, verify quiescence,
 then run privileged hooks/helpers. The previous manual `rm`/`chown` persona
 recovery path and best-effort `|| true` writer stop were removed.
 
+Architecture-conformance correction: the Langfuse `post_install.sh` mutation
+boundary now independently invokes the canonical QR1 quiescence verifier for
+`data/langfuse` before either the Docker-rootless ownership helper or host
+`chown -R` path can run. This closes the supported alternate host-agent call
+path (`ods-host-agent.py` -> Langfuse setup/post_install hook -> privileged
+ownership repair), so callers cannot bypass the ADR merely by invoking the
+hook directly.
+
 ### Security / privacy impact
 Positive. The fix does not widen listener scope or add external fallback
 paths. It removes a raw TCP bridge in favor of a QR1-scoped HTTP proxy with a
@@ -138,12 +146,36 @@ listener snapshot cannot be collected.
 ### Privileged-operation audit
 Reviewed QR1-owned references to `sudo`, `chown`, `chmod`, `rm -rf`,
 privileged hooks, `|| true`, and check/acceptance mutation. Container-writable
-MS data mutations are now limited to: Langfuse `post_install.sh` after the
-runbook writer stop and `verify-quiescent` gate; `prestart-init` after its own
-writer-container gate; and documented rollback after stack stop. Runtime
-`check` and QR1 acceptance remain read-only. Other `sudo`/`rm` occurrences are
-host service/firewall/package/checkpoint rollback operations outside
-container-writable MS persistent data, or test fixtures.
+MS data mutations are now limited to: Langfuse `post_install.sh` after its own
+mutation-boundary quiescence gate for `data/langfuse` and, in the runbook,
+after the orchestration stop plus `verify-quiescent` gate; and `prestart-init`
+after its own writer-container gate. Runtime `check` and QR1 acceptance remain
+read-only. Other `sudo`/`rm` occurrences are host
+service/firewall/package/checkpoint rollback operations outside the reviewed
+container-writable MS persistent data repair paths, or test fixtures.
+
+Call-path audit for QR1 privileged persistent-state mutation:
+
+- `data/langfuse/postgres`, `data/langfuse/clickhouse`: `mkdir`/ownership
+  repair through `extensions/services/langfuse/hooks/post_install.sh`, called
+  by the QR1 runbook, dashboard/template setup via `ods-host-agent.py`, the
+  setup-hook endpoint, and direct shell invocation. Possible writers are
+  derived from rendered writable bind mounts intersecting `data/langfuse`,
+  including broad `./data` writers such as `dashboard-api` and Langfuse state
+  containers. Enforcement point: the hook itself runs
+  `MS_QR1_QUIESCENCE_TARGETS=data/langfuse scripts/ms-qr1-prestart-provision.sh
+  verify-quiescent` before mutation.
+- `data/persona`, `data/persona/SOUL.md`: owner repair, empty Docker-created
+  directory repair, and atomic persona replacement happen through
+  `scripts/ms-qr1-prestart-provision.sh prestart-init`; post-start refresh is
+  unprivileged. Possible writers are rendered writable bind mounts
+  intersecting `data/persona`, including broad `./data` writers. Enforcement
+  point: `prestart-init` invokes its own writer-container gate before mutation.
+- `data/n8n`: ownership/mode normalization happens only through
+  `scripts/ms-qr1-prestart-provision.sh prestart-init`. Possible writers are
+  rendered writable bind mounts intersecting `data/n8n`, including n8n and
+  broad `./data` writers. Enforcement point: `prestart-init` invokes its own
+  writer-container gate before mutation.
 
 ### Upgrade / upstream impact
 Low. Runtime behavior remains isolated to QR1 helper/service paths and the new
@@ -181,13 +213,13 @@ These items are pending live qualification, not PASS evidence.
 - `bash ods/tests/test-ms-qr1-helpers.sh`
 - `(cd ods && PYTHONPYCACHEPREFIX=/tmp/ms-qr1-make-pycache make lint)`
 - `RUFF_CACHE_DIR=/tmp/ms-qr1-ruff-cache /tmp/ms-qr1-ruff/bin/ruff check ods/ --select E,F,W --ignore E501,E701,E731,E741,E402`
-- `for f in ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-prestart-provision.sh ods/scripts/ms-qr1-acceptance.sh ods/tests/test-ms-qr1-helpers.sh; do bash -n "$f"; done`
+- `for f in ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-prestart-provision.sh ods/scripts/ms-qr1-acceptance.sh ods/extensions/services/langfuse/hooks/post_install.sh ods/tests/test-ms-qr1-helpers.sh; do bash -n "$f"; done`
 - `(cd ods && bash scripts/validate-env.sh profiles/ms-qr1.env.example)`
 - `PYTHONPYCACHEPREFIX=/tmp/ms-qr1-pycache python3 -m py_compile ods/scripts/ms-qr1-ollama-http-proxy.py`
 - `(cd ods && MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config)`
 - `(cd ods && python3 tests/contracts/test-network-exposure-contracts.py)`
 - `git diff --check`
-- `rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" AGENTS.md docs/ms/ODS-MS-CHANGELOG.md docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md ods/scripts/ms-qr1-acceptance.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-ollama-http-proxy.py ods/scripts/ms-qr1-prestart-provision.sh ods/tests/test-ms-qr1-helpers.sh`
+- `rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" AGENTS.md docs/ms/ODS-MS-CHANGELOG.md docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md ods/extensions/services/langfuse/hooks/post_install.sh ods/scripts/ms-qr1-acceptance.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-ollama-http-proxy.py ods/scripts/ms-qr1-prestart-provision.sh ods/tests/test-ms-qr1-helpers.sh`
 
 ### Rollback
 Repository rollback: revert the MSODS-0011 commit.
@@ -207,8 +239,11 @@ For the provisioning helper, repository rollback removes the new pre-start
 gate. Host data rollback is normally not needed because `data/persona/SOUL.md`
 is generated from repository templates and `data/n8n` ownership is the
 required runtime owner for the rendered n8n service. If a failed pre-fix run
-left `data/persona/SOUL.md` as a directory, remove that directory and rerun the
-reviewed pre-start provisioning step before any Compose `up`.
+left `data/persona/SOUL.md` as a directory, use the canonical lifecycle:
+derive writer services, stop them, run `scripts/ms-qr1-prestart-provision.sh
+verify-quiescent`, run `sudo scripts/ms-qr1-prestart-provision.sh
+prestart-init`, then restart/recreate the required services. Do not manually
+remove, chown, or chmod container-writable MS data outside that lifecycle.
 
 ---
 

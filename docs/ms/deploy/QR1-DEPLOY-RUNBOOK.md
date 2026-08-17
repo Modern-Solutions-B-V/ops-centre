@@ -239,7 +239,9 @@ a writable bind mount intersecting `data/n8n`, `data/persona`, or
 `data/langfuse` such as n8n, dashboard-api and rendered Langfuse state
 writers. Compose stop succeeds, `verify-quiescent` confirms no corresponding
 writer container is running, and only then do the Langfuse ownership hook and
-QR1 `prestart-init` run. Langfuse PostgreSQL and ClickHouse bind-mount
+QR1 `prestart-init` run. The Langfuse hook also independently enforces the
+same quiescence boundary before ownership mutation, so host-agent or direct
+hook invocation cannot bypass the ADR. Langfuse PostgreSQL and ClickHouse bind-mount
 directories are owned for their container users; SDXL Lightning checkpoint
 exists only after SHA256 verification succeeds.
 `data/persona/SOUL.md` is a regular UTF-8 file generated through
@@ -274,12 +276,22 @@ stat -c '%U:%G %a %n' data/persona data/persona/SOUL.md data/n8n
 sha256sum data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors
 ```
 
-Rollback after this section has completed and the stack is stopped:
+Rollback after this section has completed:
 
 ```bash
-sudo rm -rf data/langfuse/postgres data/langfuse/clickhouse
+QR1_WRITER_SERVICES="$(scripts/ms-qr1-prestart-provision.sh writer-services | tr '\n' ' ')"
+test -n "$QR1_WRITER_SERVICES"
+docker compose $(scripts/ms-qr1-compose-flags.sh) stop $QR1_WRITER_SERVICES
+scripts/ms-qr1-prestart-provision.sh verify-quiescent
+sudo scripts/ms-qr1-prestart-provision.sh prestart-init
 rm -f data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors*
 ```
+
+Expected rollback: writer containers are stopped and verified before the
+canonical prestart helper performs any needed repair. The ComfyUI checkpoint
+removal is limited to the downloaded model artifact from this section; do not
+manually delete or chown `data/persona`, `data/n8n`, or `data/langfuse`
+outside the quiescence-enforcing lifecycle.
 
 If a previous failed Compose attempt created `data/persona/SOUL.md` as a
 directory, do not manually remove/chown it. Rerun this section from the

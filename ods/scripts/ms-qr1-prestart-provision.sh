@@ -76,7 +76,7 @@ import sys
 print(Path(sys.argv[1]).resolve())
 PY
 )"
-  COMPOSE_JSON="$rendered" DATA_ABS="$data_abs" OUTPUT_KIND="$output_kind" python3 - <<'PY'
+  COMPOSE_JSON="$rendered" DATA_ABS="$data_abs" OUTPUT_KIND="$output_kind" TARGETS="${MS_QR1_QUIESCENCE_TARGETS:-}" python3 - <<'PY'
 import json
 import os
 from pathlib import Path
@@ -84,11 +84,19 @@ from pathlib import Path
 data = json.loads(os.environ["COMPOSE_JSON"])
 data_abs = Path(os.environ["DATA_ABS"]).resolve()
 output_kind = os.environ["OUTPUT_KIND"]
-targets = [
-    (data_abs / "n8n").resolve(),
-    (data_abs / "persona").resolve(),
-    (data_abs / "langfuse").resolve(),
-]
+target_names = [item.strip() for item in os.environ.get("TARGETS", "").replace(",", "\n").splitlines() if item.strip()]
+if not target_names:
+    target_names = ["n8n", "persona", "langfuse"]
+targets = []
+for target in target_names:
+    target_path = Path(target)
+    if not target_path.is_absolute():
+        parts = tuple(part for part in target_path.parts if part != ".")
+        if parts and parts[0] == "data":
+            target_path = data_abs.joinpath(*parts[1:])
+        else:
+            target_path = data_abs / target_path
+    targets.append(target_path.resolve())
 writers = []
 
 def contains_or_is_contained(left: Path, right: Path) -> bool:

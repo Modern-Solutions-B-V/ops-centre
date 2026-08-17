@@ -22,6 +22,7 @@ MS OPS CENTRE AGENT RULES
 15. Preserve upstream ODS mergeability.
 16. Never perform privileged mutation of container-writable persistent state
     while a writer container is running. Require quiescent state or an
-    explicitly reviewed alternative architecture. Runtime acceptance checks
-    must be read-only. See
+    explicitly reviewed alternative architecture. Enforce quiescence both in
+    orchestration and at the privileged mutation boundary so alternate callers
+    cannot bypass the gate. Runtime acceptance checks must be read-only. See
     docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md.
