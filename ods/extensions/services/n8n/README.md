@@ -115,7 +115,13 @@ docker compose logs n8n
 
 **File permission errors on startup:**
 - n8n runs as `UID:GID` set in `.env` (default `1000:1000`)
-- Ensure `data/n8n/` is owned by that user: `chown -R 1000:1000 ods/data/n8n`
+- Do not repair `data/n8n/` while containers that can write it are running.
+  Use the supported repair lifecycle for managed deployments: stop services
+  that can write `data/n8n`, verify they are stopped, run the ownership repair
+  helper, then restart the affected services. MS QR1 operators must use the QR1
+  deploy runbook for the exact writer derivation and verification commands.
+  Direct `chown -R` while writer containers are running is not a supported
+  recovery path.
 
 ## License
 

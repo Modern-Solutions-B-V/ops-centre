@@ -20,3 +20,8 @@ MS OPS CENTRE AGENT RULES
 13. Do not approve your own implementation.
 14. Do not merge PRs unless explicitly authorised.
 15. Preserve upstream ODS mergeability.
+16. For MS Ops Centre QR1 deployment, repair and acceptance paths, never
+    perform privileged mutation of container-writable persistent state while a
+    writer container is running. Require quiescent state or an explicitly
+    reviewed alternative architecture. Runtime acceptance checks must be
+    read-only. See docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md.

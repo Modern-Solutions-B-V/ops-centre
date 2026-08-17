@@ -54,18 +54,20 @@ docker network ls
 sudo ufw status numbered
 ```
 
-On a clean Ubuntu 24.04 host, install the Python YAML package and `jq` before QR1 gates:
+On a clean Ubuntu 24.04 host, install the Python YAML package, `jq`, and
+`curl` before QR1 gates:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3-yaml jq
+sudo apt-get install -y python3-yaml jq curl
 python3 -c 'import yaml; print("python3-yaml available")'
 jq --version
+curl --version
 ```
 
-Expected: Docker client/server both report versions; `python3` exists; `import yaml` succeeds; `jq --version` reports the installed jq version; UFW policy is unchanged except Docker's own chains.
+Expected: Docker client/server both report versions; `python3` exists; `import yaml` succeeds; `jq --version` and `curl --version` report installed versions; UFW policy is unchanged except Docker's own chains.
 
-Evidence: package install transcript, `docker version`, `python3 --version`, Python YAML import output, `jq --version`, `docker network ls`, and `ufw status numbered`.
+Evidence: package install transcript, `docker version`, `python3 --version`, Python YAML import output, `jq --version`, `curl --version`, `docker network ls`, and `ufw status numbered`.
 
 Rollback:
 
@@ -186,9 +188,39 @@ Rollback: no host mutation.
 
 ## 6. Pre-Start Provisioning
 
+This section must complete before any `docker compose up`, including
+`up --no-start`, because Compose creates containers and evaluates bind mounts
+even when it does not start services.
+
+Architecture rule: privileged filesystem repair is allowed only while
+containers that can write the affected persistent state are stopped. See
+`docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md`. Runtime
+acceptance checks are read-only and must not repair ownership, permissions or
+persona files.
+
+Sequence for this section:
+
+STOP WRITERS -> VERIFY QUIESCENCE -> PRIVILEGED PRESTART INITIALIZATION /
+REPAIR -> UNPRIVILEGED GENERATION / CONFIGURATION
+
 ```bash
+QR1_WRITER_SERVICES="$(scripts/ms-qr1-prestart-provision.sh writer-services | tr '\n' ' ')"
+test -n "$QR1_WRITER_SERVICES"
+docker compose $(scripts/ms-qr1-compose-flags.sh) stop $QR1_WRITER_SERVICES
+scripts/ms-qr1-prestart-provision.sh verify-quiescent
+
 mkdir -p data/langfuse/postgres data/langfuse/clickhouse
 bash extensions/services/langfuse/hooks/post_install.sh "$PWD" "${GPU_BACKEND:-amd}"
+
+sudo scripts/ms-qr1-prestart-provision.sh prestart-init
+test -f data/persona/SOUL.md
+python3 - <<'PY'
+from pathlib import Path
+Path("data/persona/SOUL.md").read_text(encoding="utf-8")
+PY
+scripts/ms-qr1-prestart-provision.sh check
+scripts/ms-qr1-prestart-provision.sh n8n-user
+stat -c '%U:%G %a %n' data/persona data/persona/SOUL.md data/n8n
 
 mkdir -p data/comfyui/ComfyUI/models/checkpoints data/comfyui/miopen logs
 SDXL_REVISION=c6c10e8716de60c7ef4eed6b89a06f67e772b374
@@ -202,25 +234,83 @@ printf '%s  %s\n' "$SDXL_SHA256" "${SDXL_FILE}.part" | sha256sum -c -
 mv -f "${SDXL_FILE}.part" "$SDXL_FILE"
 ```
 
-Expected: Langfuse PostgreSQL and ClickHouse bind-mount directories are owned for their container users; SDXL Lightning checkpoint exists only after SHA256 verification succeeds.
+Expected: the derived writer service list includes every rendered service with
+a writable bind mount intersecting `data/n8n`, `data/persona`, or
+`data/langfuse` such as n8n, dashboard-api and rendered Langfuse state
+writers. Compose stop succeeds, `verify-quiescent` confirms no corresponding
+writer container is running, and only then do the Langfuse ownership hook and
+QR1 `prestart-init` run. QR1 relies on this runbook-owned stop/verify gate
+before invoking the generic Langfuse hook; generic dashboard-driven Langfuse
+setup hardening is tracked separately in
+`docs/ms/backlog/GENERIC-ODS-LIFECYCLE-HARDENING.md`. Langfuse PostgreSQL and
+ClickHouse bind-mount directories are owned for their container users; SDXL
+Lightning checkpoint exists only after SHA256 verification succeeds.
+`data/persona/SOUL.md` is a regular UTF-8 file generated through
+`scripts/build-installation-context.py` into a same-directory temporary file
+and atomically renamed into place; `data/persona/SOUL.md` is not a directory
+or symlink. `data/persona` is not a symlink. `data/n8n` exists, is not
+world-writable, and is owned by the effective n8n UID/GID rendered from the
+active Compose configuration. If any rendered container that can write the
+affected data path is running, `prestart-init` fails before mutation and tells
+the operator which writer must stop.
+
+Security note: the n8n ownership correction is intentionally scoped to the
+`data/n8n` tree only. The helper does not silently invoke `sudo`; this runbook
+uses `sudo` explicitly because clean-host ownership repair may require root.
+It may repair root-owned bind mount directories or files created by a failed
+first start only while writer containers are stopped, but it must not
+recursively chown the whole `data/` tree and must not use `chmod 777`.
+Directory modes are normalized separately from file modes. Any symlink at
+`data/persona`, at `data/persona/SOUL.md`, or under `data/n8n` is a hard error
+because the privileged helper must never follow a writable link to a host path
+outside the persistent tree. `prestart-init` normalizes strict owner-only n8n
+modes before first start; later `check` runs are read-only and accept
+n8n-created runtime modes such as `0644` files and `0755` directories as long
+as ownership is correct, owner write and directory search are present where
+required, and group/world write bits are absent.
 
 Evidence:
 
 ```bash
 stat -c '%U:%G %n' data/langfuse/postgres data/langfuse/clickhouse
+stat -c '%U:%G %a %n' data/persona data/persona/SOUL.md data/n8n
 sha256sum data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors
 ```
 
-Rollback:
+Rollback after this section has completed:
 
 ```bash
-sudo rm -rf data/langfuse/postgres data/langfuse/clickhouse
+QR1_WRITER_SERVICES="$(scripts/ms-qr1-prestart-provision.sh writer-services | tr '\n' ' ')"
+test -n "$QR1_WRITER_SERVICES"
+docker compose $(scripts/ms-qr1-compose-flags.sh) stop $QR1_WRITER_SERVICES
+scripts/ms-qr1-prestart-provision.sh verify-quiescent
+sudo scripts/ms-qr1-prestart-provision.sh prestart-init
 rm -f data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors*
+```
+
+Expected rollback: writer containers are stopped and verified before the
+canonical prestart helper performs any needed repair. The ComfyUI checkpoint
+removal is limited to the downloaded model artifact from this section; do not
+manually delete or chown `data/persona`, `data/n8n`, or `data/langfuse`
+outside the quiescence-enforcing lifecycle.
+
+If a previous failed Compose attempt created `data/persona/SOUL.md` as a
+directory, do not manually remove/chown it. Rerun this section from the
+writer-stop gate and let `prestart-init` fail or perform the narrowly scoped
+repair behind verified quiescence. If the helper reports that manual removal
+is required, stop and capture that output for review rather than bypassing the
+quiescence gate.
+
+```bash
+QR1_WRITER_SERVICES="$(scripts/ms-qr1-prestart-provision.sh writer-services | tr '\n' ' ')"
+docker compose $(scripts/ms-qr1-compose-flags.sh) stop $QR1_WRITER_SERVICES
+scripts/ms-qr1-prestart-provision.sh verify-quiescent
+sudo scripts/ms-qr1-prestart-provision.sh prestart-init
 ```
 
 ## 7. Create QR1 Docker Network And Fill Gateway
 
-Create QR1 Docker networks through Compose before final render. Use a temporary gateway only for this no-start network/container creation step; section 11 force-recreates containers after the real gateway is written to `.env`. The internal Langfuse network is intentionally not granted host access.
+Create QR1 Docker networks through Compose before final render. Use a temporary gateway only for this no-start network/container creation step; section 11 force-recreates containers after the real gateway is written to `.env`. The internal Langfuse network is intentionally not granted host access. Do not run this section until section 6 has generated `data/persona/SOUL.md` and prepared `data/n8n`; `up --no-start` still evaluates those bind mounts.
 
 ```bash
 MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --no-start
@@ -275,45 +365,43 @@ sudo rm -f /etc/systemd/system/ods-host-agent.service
 sudo systemctl daemon-reload
 ```
 
-## 9. Narrow Ollama Docker Bridge
+## 9. Narrow Ollama Docker HTTP Bridge
 
-Do not set `OLLAMA_HOST=0.0.0.0`. QR1 keeps host-native Ollama loopback-only and installs a narrow host-side `socat` bridge that listens only on discovered non-internal Docker gateway IP addresses and forwards to `127.0.0.1:11434`.
+Do not set `OLLAMA_HOST=0.0.0.0`. QR1 keeps host-native Ollama loopback-only and installs a narrow host-side HTTP proxy that listens only on discovered non-internal Docker gateway IP addresses, forwards only to `127.0.0.1:11434`, and rewrites the upstream `Host` header to `localhost:11434` so Ollama accepts container-originated requests for `ms-qr1-host:11434`.
 
 Plan first:
 
 ```bash
 scripts/ms-qr1-ollama-bridge.sh plan
+scripts/ms-qr1-ollama-bridge.sh expected-listeners
 scripts/ms-qr1-ollama-bridge.sh render-unit | tee /tmp/ms-qr1-ollama-bridge.service
-grep 'bind=$$addr' /tmp/ms-qr1-ollama-bridge.service
-grep 'Environment="MS_QR1_OLLAMA_BRIDGE_ADDRS=' /tmp/ms-qr1-ollama-bridge.service
+grep 'WorkingDirectory=".*/ods"' /tmp/ms-qr1-ollama-bridge.service
+grep 'ExecStart="/usr/local/libexec/ms-qr1/ms-qr1-ollama-bridge.sh" serve' /tmp/ms-qr1-ollama-bridge.service
+grep 'NoNewPrivileges=true' /tmp/ms-qr1-ollama-bridge.service
+grep 'PrivateTmp=true' /tmp/ms-qr1-ollama-bridge.service
+grep 'ProtectSystem=strict' /tmp/ms-qr1-ollama-bridge.service
+grep 'MS_QR1_OLLAMA_MAX_BODY_BYTES=268435456' /tmp/ms-qr1-ollama-bridge.service
+grep 'MS_QR1_OLLAMA_UPSTREAM_TIMEOUT=300' /tmp/ms-qr1-ollama-bridge.service
 ```
 
-Install `socat` if absent, then install the bridge:
+Install the bridge:
 
 ```bash
-if command -v socat; then
-  echo "socat already installed"
-else
-  sudo apt-get install -y socat
-fi
 sudo scripts/ms-qr1-ollama-bridge.sh install
 curl -fsS http://127.0.0.1:11434/api/tags
 systemctl status ms-qr1-ollama-bridge.service --no-pager
 ss -tlnp | grep ':11434'
 ```
 
-Expected: Ollama still answers on `127.0.0.1:11434`; `ms-qr1-ollama-bridge.service` listens on non-internal Docker gateway IP address(es), not `0.0.0.0` or `::`.
+Expected: Ollama still answers on `127.0.0.1:11434`; `ms-qr1-ollama-bridge.service` listens on non-internal Docker gateway IP address(es), not `0.0.0.0` or `::`; the rendered unit executes the installed root-owned `/usr/local/libexec/ms-qr1/ms-qr1-ollama-bridge.sh` copy so service restarts rediscover current Docker gateway addresses before binding without executing mutable checkout code. The proxy default request-body cap is `268435456` bytes and the upstream timeout is `300` seconds.
 
-Evidence: bridge plan output, rendered unit, `systemctl status`, and `ss -tlnp` showing listener addresses.
+Evidence: bridge plan output, expected-listeners output, rendered unit, `stat -c '%U:%G %a %n' /usr/local/libexec/ms-qr1/ms-qr1-ollama-bridge.sh /usr/local/libexec/ms-qr1/ms-qr1-ollama-http-proxy.py /usr/local/libexec/ms-qr1/ms-qr1-compose-flags.sh`, `systemctl status`, and `ss -tlnp` showing listener addresses.
 
 Rollback:
 
 ```bash
 sudo scripts/ms-qr1-ollama-bridge.sh remove
-sudo apt-get purge socat
 ```
-
-Only purge `socat` if QR1 installed it and no other local service needs it.
 
 ## 10. Docker Subnet UFW Rules
 
@@ -345,14 +433,19 @@ Expected rollback: no `MS QR1 docker-to-host` rules remain. Use the helper rathe
 
 ## 11. Start QR1 Stack
 
+Sequence for the remaining lifecycle:
+
+START STACK -> POSTSTART UNPRIVILEGED REFRESH -> READ-ONLY ACCEPTANCE
+
 ```bash
 docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --force-recreate
 docker compose $(scripts/ms-qr1-compose-flags.sh) ps
+scripts/ms-qr1-prestart-provision.sh poststart-refresh
 ```
 
-Expected: approved QR1 services start. Native Ollama remains the inference path; no AMD tuning, UMA/GTT/IOMMU, Lemonade, ODS Tailscale, OpenClaw, Brave Search, ods-proxy, ODS OpenCode extension, remote-provider egress service, or remote-provider SSH tunnel starts.
+Expected: approved QR1 services start. Native Ollama remains the inference path; no AMD tuning, UMA/GTT/IOMMU, Lemonade, ODS Tailscale, OpenClaw, Brave Search, ods-proxy, ODS OpenCode extension, remote-provider egress service, or remote-provider SSH tunnel starts. After services are up, the Hermes persona is refreshed again as the deployment user so the installation context can include running services. The helper atomically replaces `data/persona/SOUL.md`, invokes `docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps --force-recreate hermes` so Docker re-establishes the file bind mount against the new inode, waits for Docker health, copies `/opt/hermes/docker/SOUL.md` to `/opt/data/SOUL.md` inside the recreated container, invokes `docker compose $(scripts/ms-qr1-compose-flags.sh) restart hermes` so Hermes reloads persistent persona state, waits for Docker health again, then recreates `hermes-proxy`.
 
-Evidence: `docker compose ps`.
+Evidence: `docker compose ps`, successful `scripts/ms-qr1-prestart-provision.sh poststart-refresh` output, Compose recreate/restart output for `hermes` and `hermes-proxy`, `docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ods-hermes`, and no host listener on port `9119`. If Docker is unreachable, `ods-hermes` is not running before refresh, the recreate/restart command fails, `docker exec` cannot sync `/opt/data/SOUL.md`, or Hermes Docker health does not become `healthy`, `poststart-refresh` must fail and the stack is not ready for acceptance evidence.
 
 Rollback:
 
@@ -365,10 +458,12 @@ If `docker compose down`, Docker network removal, or subnet reallocation occurs,
 
 ```bash
 sudo systemctl restart ods-host-agent.service
+sudo systemctl restart ms-qr1-ollama-bridge.service
 systemctl status ods-host-agent.service --no-pager
+systemctl status ms-qr1-ollama-bridge.service --no-pager
 ```
 
-The helpers intentionally rediscover current network gateways and rules rather than assuming a fixed Docker CIDR. The host-agent must restart because its Linux bind address is resolved once at service start.
+The helpers intentionally rediscover current network gateways and rules rather than assuming a fixed Docker CIDR. The host-agent and Ollama bridge must restart because their Linux bind addresses are resolved at service start.
 
 ## 12. Container-To-Host Inference Boundary
 
@@ -391,7 +486,7 @@ ss -tlnp | grep ':11434'
 sudo ufw status numbered
 ```
 
-Expected: containers receive HTTP `200` from host-native Ollama through `ms-qr1-host`; host `ss` shows no `0.0.0.0:11434` or `[::]:11434` listener; UFW permits only non-internal Docker CIDR(s) to the Docker gateway on port `11434`.
+Expected: containers receive HTTP `200` from host-native Ollama through `ms-qr1-host` with the default `Host: ms-qr1-host:11434`; host `ss` shows no `0.0.0.0:11434` or `[::]:11434` listener; UFW permits only non-internal Docker CIDR(s) to the Docker gateway on port `11434`. The bridge rewrites the upstream Host header to `localhost:11434`; `scripts/ms-qr1-ollama-http-proxy.py --self-test` covers Host rewriting and streaming behavior without contacting EVO-X3.
 
 Evidence: command outputs.
 
@@ -436,6 +531,10 @@ python3 tests/contracts/test-network-exposure-contracts.py
 ```
 
 Expected: acceptance checks pass. Qdrant unauthenticated requests must be rejected. Hermes host port `9119` must be unbound. Local-only LiteLLM routes must have no fallback. Rendered QR1 services must match the allow-list/exclusion policy. Every rendered published QR1 service port must bind loopback. Host-agent nmcli endpoints must reject unauthenticated requests on the resolved host-agent bind address.
+The pre-start provisioning check must confirm `data/persona/SOUL.md` is a
+regular file and `data/n8n` is owned by the effective rendered n8n UID/GID.
+This check is read-only; any ownership, permission or persona repair requires
+stopping the relevant writer containers and rerunning section 6.
 
 Diagnostic, not a QR1 blocking gate:
 

@@ -8,6 +8,269 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-17 — Fix live QR1 clean-host deployment defects
+
+### Change ID
+`MSODS-0011`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`fix/qr1-ollama-http-proxy` / PR pending
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`EXTEND`
+
+### Files changed
+- `ods/scripts/ms-qr1-ollama-bridge.sh`
+- `ods/scripts/ms-qr1-ollama-http-proxy.py`
+- `ods/scripts/ods-verify-quiescent-data-writers.sh`
+- `ods/scripts/ms-qr1-prestart-provision.sh`
+- `ods/scripts/ms-qr1-acceptance.sh`
+- `ods/lib/rootless-ownership.sh`
+- `ods/extensions/services/langfuse/hooks/post_install.sh`
+- `ods/extensions/services/langfuse/README.md`
+- `ods/extensions/services/n8n/README.md`
+- `ods/tests/test-ms-qr1-helpers.sh`
+- `docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md`
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/backlog/GENERIC-ODS-LIFECYCLE-HARDENING.md`
+- `AGENTS.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Live QR1 CP-12 qualification and the first clean EVO-X3 deployment exposed
+three deployment blockers:
+
+1. The raw TCP Ollama bridge kept `Host: ms-qr1-host:11434`, which
+   host-native Ollama rejected with HTTP `403`. The same request succeeded
+   when the Host header was `localhost:11434` or `127.0.0.1:11434`.
+2. The first Compose start evaluated the Hermes file bind mount before
+   `data/persona/SOUL.md` existed, so Docker created that source path as a
+   directory and Hermes failed with a not-a-directory mount error.
+3. Clean-host `data/n8n` was root-owned while rendered QR1 n8n ran as the
+   configured non-root UID/GID, causing `EACCES` while n8n opened
+   `/home/node/.n8n/config`.
+
+### Behavior before
+`ms-qr1-ollama-bridge.service` used `socat` TCP forwarding from discovered
+Docker gateway IP address(es) to `127.0.0.1:11434`. TCP forwarding preserved
+the client Host header and the rendered systemd unit captured listener
+addresses at install time. The QR1 runbook reached `docker compose up
+--no-start` before generating `data/persona/SOUL.md` or correcting
+`data/n8n` ownership, even though `up --no-start` still creates containers and
+evaluates bind mounts.
+
+### Behavior after
+`ms-qr1-ollama-bridge.service` starts the QR1 HTTP proxy through an installed
+root-owned copy of `ms-qr1-ollama-bridge.sh` under
+`/usr/local/libexec/ms-qr1/`; install/update refreshes both the bridge and
+proxy executable copies plus the compose-flags helper it invokes, and remove
+deletes them. The unit no longer executes mutable deploy-user checkout code.
+Each service start rediscovers approved
+non-internal Docker gateway IP address(es), binds only those addresses on TCP
+`11434`, forwards only to `127.0.0.1:11434`, rewrites upstream Host to
+`localhost:11434`, and relays streaming/chunked Ollama responses incrementally
+with `HTTPResponse.read1(...)`. It rejects malformed request framing, streams
+request bodies upstream in bounded 8192 byte reads, caps request bodies at
+`268435456` bytes by default, closes downstream promptly when a fixed-length
+upstream response is truncated, and uses a configurable `300` second upstream
+timeout. `OLLAMA_HOST=127.0.0.1:11434`, UFW Docker-to-host rules, and host
+Tailscale Serve behavior are unchanged.
+
+`docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md` records the
+architectural decision that privileged filesystem mutation must not operate
+against container-writable persistent state while a writer container is
+running. The previous incremental hardening approach was abandoned because
+pre-scan and mutation happen at different moments in time, container-writable
+paths can change between them, root pathname resolution creates recurring
+TOCTOU variants, and the growing mitigation framework became harder to audit
+than the lifecycle boundary it was trying to replace.
+
+`scripts/ms-qr1-prestart-provision.sh prestart-init` is now the explicit
+idempotent QR1 initialization/repair gate. It runs before any Compose `up`,
+including `up --no-start`; derives the relevant writer containers from the
+rendered Compose writable bind mounts intersecting `data/n8n`,
+`data/persona`, or `data/langfuse`; fails closed before mutation if any writer
+of the affected data paths is running; ensures `data/persona` exists and is
+operator-owned; fails closed if `data/persona` or `data/persona/SOUL.md` is a
+symlink; repairs an empty Docker-created `data/persona/SOUL.md` directory only
+behind verified quiescence; refuses non-empty directories; generates the
+persona through the existing `scripts/build-installation-context.py` into a
+same-directory temporary file; and atomically replaces `SOUL.md`. It resolves
+n8n's effective numeric UID/GID from the rendered Compose configuration,
+creates only `data/n8n`, and corrects only that directory tree to strict
+owner-only pre-start modes.
+
+The `check` action is intentionally read-only and suitable for the blocking
+acceptance gate. It validates the runtime invariant recursively instead of
+exact pre-start modes, so n8n-created `0644` files and `0755` directories pass
+while wrong owners, missing owner-write, missing owner-search on directories,
+group/world write bits, symlinks, and unexpected file types fail. It performs
+no chown, chmod, file replacement or repair.
+
+After Compose startup, `scripts/ms-qr1-prestart-provision.sh poststart-refresh`
+must run as the deployment user, reruns the existing builder, atomically
+replaces `data/persona/SOUL.md`, recreates `hermes` and `hermes-proxy` through
+`docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps
+--force-recreate ...`, waits for Docker health on `ods-hermes`, syncs the
+repository-supported persistent persona path with
+`docker exec ods-hermes cp /opt/hermes/docker/SOUL.md /opt/data/SOUL.md`,
+restarts Hermes so it reloads persistent persona state, waits for Docker
+health again, and then recreates `hermes-proxy`. It no longer probes
+`127.0.0.1:9119` because QR1 intentionally keeps Hermes host port `9119`
+unbound.
+
+The QR1 runbook now has one authoritative repair path for container-writable
+MS data: derive writer services, stop them through Compose, verify quiescence,
+then run privileged hooks/helpers. The previous manual `rm`/`chown` persona
+recovery path and best-effort `|| true` writer stop were removed.
+
+Scope correction: the QR1 quiescence ADR is binding for MS Ops Centre QR1
+deployment, repair and acceptance paths only. `scripts/ods-verify-quiescent-data-writers.sh`
+is retained as the read-only writer-derivation helper used by QR1; QR1 invokes
+it with the canonical complete QR1 Compose model from
+`scripts/ms-qr1-compose-flags.sh`, so caller-supplied
+`ODS_QUIESCENCE_COMPOSE_FLAGS` or target overrides cannot remove base writers
+from QR1 mutation-boundary checks. The previous attempt to enforce this QR1
+decision unconditionally in generic Langfuse and Docker-rootless lifecycle
+paths was removed from this PR. Generic ODS lifecycle issues discovered during
+review are documented in
+`docs/ms/backlog/GENERIC-ODS-LIFECYCLE-HARDENING.md` and are not claimed fixed
+here.
+
+### Security / privacy impact
+Positive. The fix does not widen listener scope or add external fallback
+paths. It removes a raw TCP bridge in favor of a QR1-scoped HTTP proxy with a
+fixed loopback upstream and explicit Host rewrite. The n8n ownership repair is
+scoped to the `data/n8n` tree only, is allowed only while rendered writer
+containers are stopped, and does not recursively chown unrelated data paths or
+use world-writable permissions. Runtime acceptance checks are read-only.
+Acceptance now captures `ss -tlnp` before listener parsing and fails if the
+listener snapshot cannot be collected.
+
+### Privileged-operation audit
+Bounded QR1 audit reviewed paths executed by the QR1 deployment runbook and QR1
+acceptance flow. In QR1, container-writable MS data mutation happens only after
+the runbook derives QR1 writer services from the complete QR1 Compose model,
+stops them, and verifies no corresponding writer container is running. Runtime
+`check` and QR1 acceptance remain read-only. Generic host-agent/rootless,
+installer rerun, purge and uninstall mutation paths were reviewed only to
+classify whether QR1 invokes them; they are deferred in the lifecycle-hardening
+backlog rather than claimed remediated by this QR1 PR.
+
+Call-path audit for QR1 privileged persistent-state mutation:
+
+- `data/langfuse/postgres`, `data/langfuse/clickhouse`: ownership repair
+  through `extensions/services/langfuse/hooks/post_install.sh`, invoked by the
+  QR1 runbook only after QR1 `writer-services`, Compose stop and
+  `verify-quiescent` have passed. Possible QR1 writers are rendered writable
+  bind mounts intersecting `data/langfuse`, including broad `./data` writers
+  such as `dashboard-api` and Langfuse state containers. Enforcement point for
+  QR1 is the runbook-owned stop/verify gate immediately before the hook call.
+- `data/persona`, `data/persona/SOUL.md`: owner repair, empty Docker-created
+  directory repair, and atomic persona replacement happen through
+  `scripts/ms-qr1-prestart-provision.sh prestart-init`; post-start refresh is
+  unprivileged. Possible writers are rendered writable bind mounts
+  intersecting `data/persona`, including broad `./data` writers. Enforcement
+  point: `prestart-init` invokes its own writer-container gate before mutation.
+- `data/n8n`: ownership/mode normalization happens only through
+  `scripts/ms-qr1-prestart-provision.sh prestart-init`. Possible writers are
+  rendered writable bind mounts intersecting `data/n8n`, including n8n and
+  broad `./data` writers. Enforcement point: `prestart-init` invokes its own
+  writer-container gate before mutation.
+
+Generic findings classified but deferred:
+
+- `MSODS-LIFE-0001`: host-agent Docker-rootless ownership repair. QR1
+  invocation: no for EVO-X3 QR1/rootful Docker; deferred.
+- `MSODS-LIFE-0002`: dashboard-driven Langfuse setup quiescence. QR1
+  invocation: only through the QR1 runbook after QR1 stop/verify; generic
+  dashboard orchestration deferred.
+- `MSODS-LIFE-0003`: generic/rootful installer rerun ownership repair. QR1
+  invocation: no; deferred.
+- `MSODS-LIFE-0004`: `ods purge` quiescence. QR1 invocation: no; deferred.
+- `MSODS-LIFE-0005`: `ods-uninstall.sh` writer termination. QR1 invocation:
+  no; deferred.
+
+### Upgrade / upstream impact
+Low. The corrective behavior is QR1-scoped. Generic ODS Langfuse setup and
+Docker-rootless lifecycle semantics are not redesigned by this PR; generic
+findings are documented for later upstream/lifecycle hardening.
+
+### Qualification status
+Local/static/CI validation passed for this corrective branch. Hardware-backed
+EVO-X3 validation of the corrective proxy/provisioner is **PENDING** and
+deferred until after merge. The current EVO-X3 host remains on the previous
+merged baseline, and operational readiness is not claimed for this corrective
+branch.
+
+Pending post-merge EVO-X3 live qualification steps:
+
+1. Pull merged `ms/main`.
+2. Stop relevant writer containers and run corrected `prestart-init`.
+3. Replace/restart the old bridge with the reviewed HTTP proxy.
+4. Verify the proxy systemd service actually starts under its sandbox, with
+   `systemctl status ms-qr1-ollama-bridge.service --no-pager` and
+   `journalctl -u ms-qr1-ollama-bridge.service -n 50 --no-pager`.
+5. Verify listener scope remains gateway-only with no wildcard listener.
+6. Verify LiteLLM -> Ollama default-Host `/api/tags` returns HTTP `200`.
+7. Verify dashboard-api -> Ollama default-Host `/api/tags` returns HTTP `200`.
+8. Verify live streaming first-token behavior through the proxy.
+9. Verify n8n remains healthy after normalization.
+10. Verify Hermes post-start persona refresh recreates Hermes, syncs
+    `/opt/data/SOUL.md`, and Hermes reads the refreshed persona.
+11. Verify UFW/default-deny posture is unchanged.
+12. Run full QR1 acceptance.
+
+These items are pending live qualification, not PASS evidence.
+
+### Validation performed
+- `python3 ods/scripts/ms-qr1-ollama-http-proxy.py --self-test`
+- `bash ods/tests/test-ms-qr1-helpers.sh`
+- `bash ods/scripts/ods-verify-quiescent-data-writers.sh --help`
+- `(cd ods && PYTHONPYCACHEPREFIX=/tmp/ms-qr1-make-pycache make lint)`
+- `RUFF_CACHE_DIR=/tmp/ms-qr1-ruff-cache /tmp/ms-qr1-ruff/bin/ruff check ods/ --select E,F,W --ignore E501,E701,E731,E741,E402`
+- `for f in ods/scripts/ods-verify-quiescent-data-writers.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-prestart-provision.sh ods/scripts/ms-qr1-acceptance.sh ods/extensions/services/langfuse/hooks/post_install.sh ods/lib/rootless-ownership.sh ods/tests/test-ms-qr1-helpers.sh; do bash -n "$f"; done`
+- `(cd ods && bash scripts/validate-env.sh profiles/ms-qr1.env.example)`
+- `PYTHONPYCACHEPREFIX=/tmp/ms-qr1-pycache python3 -m py_compile ods/scripts/ms-qr1-ollama-http-proxy.py ods/bin/ods-host-agent.py`
+- `(cd ods && MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config)`
+- `(cd ods && tmpdir="$(mktemp -d /tmp/generic-langfuse-compose.XXXXXX)" && cp extensions/services/langfuse/compose.yaml.disabled "$tmpdir/compose.yaml" && docker compose --env-file profiles/ms-qr1.env.example -f docker-compose.base.yml -f docker-compose.amd.yml -f extensions/services/ape/compose.yaml -f extensions/services/comfyui/compose.yaml -f extensions/services/comfyui/compose.amd.yaml -f extensions/services/embeddings/compose.yaml -f extensions/services/hermes/compose.yaml -f extensions/services/hermes-proxy/compose.yaml -f "$tmpdir/compose.yaml" -f extensions/services/litellm/compose.yaml -f extensions/services/n8n/compose.yaml -f extensions/services/perplexica/compose.yaml -f extensions/services/privacy-shield/compose.yaml -f extensions/services/qdrant/compose.yaml -f extensions/services/searxng/compose.yaml -f extensions/services/token-spy/compose.yaml -f extensions/services/tts/compose.yaml -f extensions/services/whisper/compose.yaml -f docker-compose.ms-qr1.yml config >/tmp/generic-langfuse-compose.rendered.yml)`
+- `(cd ods && python3 tests/contracts/test-network-exposure-contracts.py)`
+- `git diff --check`
+- `rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" AGENTS.md docs/ms/ODS-MS-CHANGELOG.md docs/ms/backlog/GENERIC-ODS-LIFECYCLE-HARDENING.md docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md ods/extensions/services/langfuse/README.md ods/extensions/services/langfuse/hooks/post_install.sh ods/extensions/services/n8n/README.md ods/lib/rootless-ownership.sh ods/scripts/ods-verify-quiescent-data-writers.sh ods/scripts/ms-qr1-acceptance.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-ollama-http-proxy.py ods/scripts/ms-qr1-prestart-provision.sh ods/tests/test-ms-qr1-helpers.sh`
+
+### Rollback
+Repository rollback: revert the MSODS-0011 commit.
+
+Host rollback if already deployed:
+
+```bash
+cd ~/ms-ops/ops-centre/ods
+sudo scripts/ms-qr1-ollama-bridge.sh remove
+sudo systemctl daemon-reload
+ss -tlnp | grep ':11434' || true
+```
+
+Expected rollback: only host-native Ollama remains on `127.0.0.1:11434`; no
+`ms-qr1-ollama-bridge.service` unit or Docker-gateway `11434` listener remains.
+For the provisioning helper, repository rollback removes the new pre-start
+gate. Host data rollback is normally not needed because `data/persona/SOUL.md`
+is generated from repository templates and `data/n8n` ownership is the
+required runtime owner for the rendered n8n service. If a failed pre-fix run
+left `data/persona/SOUL.md` as a directory, use the canonical lifecycle:
+derive writer services, stop them, run `scripts/ms-qr1-prestart-provision.sh
+verify-quiescent`, run `sudo scripts/ms-qr1-prestart-provision.sh
+prestart-init`, then restart/recreate the required services. Do not manually
+remove, chown, or chmod container-writable MS data outside that lifecycle.
+
+---
+
 ## 2026-08-16 — Fix QR1 placeholder acceptance gate
 
 ### Change ID

@@ -139,7 +139,7 @@ chown_dir() {
             else
                 log "ERROR: cannot create $dir — sudo unavailable and mkdir failed (permission denied). " \
                     "langfuse postgres/clickhouse will fail to initialize without this directory. " \
-                    "Run manually: sudo mkdir -p $dir && sudo chown -R $owner $dir, then retry the install."
+                    "Stop derived writers, verify quiescence, then retry the Langfuse post_install hook through the QR1 runbook lifecycle."
                 return 1
             fi
         fi
@@ -150,14 +150,14 @@ chown_dir() {
         if ! $SUDO chown -R "$owner" "$dir"; then
             log "ERROR: 'sudo chown -R $owner $dir' failed. " \
                 "langfuse postgres (uid 70) / clickhouse (uid 101) will fail to initialize without this ownership. " \
-                "Verify the path exists and is writable, then run manually: sudo chown -R $owner $dir, then retry the install."
+                "Verify the path exists, stop derived writers, verify quiescence, then retry the QR1 provisioning lifecycle."
             return 1
         fi
     else
         if ! chown -R "$owner" "$dir" 2>/dev/null; then
             log "ERROR: chown failed for $dir and sudo is unavailable (not root, sudo not installed). " \
                 "langfuse postgres (uid 70) / clickhouse (uid 101) will fail to initialize without this ownership. " \
-                "Run manually as root: chown -R $owner $dir (or install sudo), then retry the install."
+                "Retry through the QR1 runbook lifecycle with explicit operator-controlled elevation."
             return 1
         fi
     fi
