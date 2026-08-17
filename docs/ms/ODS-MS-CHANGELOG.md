@@ -8,6 +8,108 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-17 — Close EVO-X3 QR1 hardware qualification
+
+### Change ID
+`MSODS-0015`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`docs/qr1-evox3-qualification-closeout` / PR pending
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`CONFIGURE`
+
+### Files changed
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Record the final EVO-X3 QR1 hardware qualification result after all corrective
+PRs were merged into `ms/main`.
+
+Final baseline on EVO-X3:
+
+```text
+b7ede9f3 (HEAD -> ms/main, origin/ms/main, origin/HEAD) Merge pull request #10 from Modern-Solutions-B-V/fix/qr1-tailscale-serve-tree-format
+504daa14 fix: accept live Tailscale Serve tree output
+f3a5a3ca Merge pull request #9 from Modern-Solutions-B-V/fix/qr1-acceptance-tailscale-hermes
+## ms/main...origin/ms/main
+```
+
+Final live evidence:
+
+- Full QR1 stack was running; all long-running services reported healthy.
+  `langfuse-minio-init` was the expected completed one-shot container.
+- `ms-qr1-ollama-bridge.service` was active.
+- `systemd-analyze verify /etc/systemd/system/ms-qr1-ollama-bridge.service`
+  returned `SYSTEMD_VERIFY_RC=0`.
+- Host listeners matched the QR1 model: Docker gateway `172.19.0.1:11434`
+  for the HTTP bridge, Docker gateway `172.19.0.1:7710` for host-agent,
+  loopback `127.0.0.1:11434` for Ollama, loopback `127.0.0.1:9120` for the
+  Hermes proxy, approved Tailscale Serve listeners on tailnet `11434`, and no
+  host listener on `9119`.
+- UFW was active with only the expected Tailscale interface allowances plus
+  Docker CIDR `172.19.0.0/16` to `172.19.0.1` on TCP `11434` and `7710`.
+- `tailscale serve status` showed the approved tree mapping from tailnet TCP
+  `11434` to `tcp://127.0.0.1:11434`.
+- `ollama list` contained `qwen3.8:27b`.
+- `scripts/ms-qr1-prestart-provision.sh check` returned
+  `PRESTART_CHECK_RC=0`.
+- Blocking QR1 acceptance returned:
+
+```text
+All QR1 acceptance checks passed
+FINAL_ACCEPTANCE_RC=0
+```
+
+### Live defects discovered and resolved during qualification
+1. The raw `socat` Ollama bridge preserved `Host: ms-qr1-host:11434`, causing
+   Ollama HTTP `403`; replaced with the reviewed HTTP-aware bridge that
+   rewrites the upstream Host header while preserving loopback Ollama.
+2. Hermes `data/persona/SOUL.md` could be absent before Compose evaluated the
+   file bind mount, allowing Docker to create it as a directory; QR1 now
+   provisions and verifies the persona file before Compose can trigger the
+   bind.
+3. Clean-host `data/n8n` ownership could be root-owned while n8n ran as the
+   rendered non-root UID/GID; QR1 now provisions the persistent directory for
+   the effective n8n identity.
+4. Privileged persistent-state repair needed an explicit quiescent-writer
+   boundary; QR1 now requires privileged repair only against verified stopped
+   writer containers, with runtime acceptance remaining read-only.
+5. Ubuntu 24.04 systemd rejected quoted `WorkingDirectory=` in the generated
+   bridge unit; unit rendering now emits the accepted unquoted absolute
+   `WorkingDirectory=` while preserving the reviewed `ExecStart=`.
+6. QR1 acceptance did not account for the intended Hermes/Caddy unauthenticated
+   `303 Location: /auth/required` behavior; the gate now accepts only that
+   exact auth redirect or direct denial responses and still rejects
+   unauthenticated `200`.
+7. QR1 acceptance initially parsed sanitized Tailscale Serve output instead of
+   the actual CLI tree format; the gate now recognizes the documented
+   `|--` / `|-->` tree prefixes without weakening the exact tailnet
+   `11434 -> 127.0.0.1:11434` proof.
+
+### Qualification status
+**PASS.** All corrective PRs are merged, and the final live EVO-X3 host passed
+the blocking QR1 acceptance gate on merged `ms/main` commit `b7ede9f3` with
+`FINAL_ACCEPTANCE_RC=0`.
+
+### Validation performed
+- Markdown/content review of this documentation-only closeout.
+- `git diff --check`
+- `git diff --name-only` confirmed only documentation files changed.
+
+### Rollback
+Repository rollback: revert the MSODS-0015 documentation commit. Host rollback
+is not required because this change records qualification status only.
+
+---
+
 ## 2026-08-17 — Match live Tailscale Serve tree output in QR1 acceptance
 
 ### Change ID
