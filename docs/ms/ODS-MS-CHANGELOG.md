@@ -31,8 +31,10 @@ Codex
 - `ods/scripts/ms-qr1-prestart-provision.sh`
 - `ods/scripts/ms-qr1-acceptance.sh`
 - `ods/tests/test-ms-qr1-helpers.sh`
+- `docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md`
 - `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
 - `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `AGENTS.md`
 - `docs/ms/ODS-MS-CHANGELOG.md`
 
 ### Reason
@@ -75,43 +77,50 @@ upstream response is truncated, and uses a configurable `300` second upstream
 timeout. `OLLAMA_HOST=127.0.0.1:11434`, UFW Docker-to-host rules, and host
 Tailscale Serve behavior are unchanged.
 
-`scripts/ms-qr1-prestart-provision.sh` is now the explicit idempotent QR1
-pre-start provisioning gate. It runs before any Compose `up`, including
-`up --no-start`; ensures `data/persona` exists and is operator-owned; fails
-closed if `data/persona` or `data/persona/SOUL.md` is a symlink; fails safely
-if `data/persona/SOUL.md` is a directory; generates the persona through the
-existing `scripts/build-installation-context.py` into a trusted temporary file;
-then installs `SOUL.md` through an opened no-follow `data/persona` directory
-descriptor so the builder never opens the privileged final output path. The
-helper verifies the result is a regular UTF-8 file; resolves n8n's effective
-numeric UID/GID from the rendered Compose configuration; creates only
-`data/n8n`; and corrects only that directory tree to owner-writable,
-non-world-writable permissions with directory/file-specific modes. Symlinks at
-`data/persona`, at `data/persona/SOUL.md`, and anywhere under `data/n8n`,
-including nested entries, are rejected before any ownership or mode mutation so
-privileged provisioning never follows a link to a host path outside the QR1
-persistent tree. n8n traversal and mutation are anchored to opened directory descriptors
-and use `dir_fd`/no-follow lookups plus descriptor-based `fchown`/`fchmod`, so
-renaming a previously scanned parent path cannot redirect privileged mutation
-outside the opened `data/n8n` tree. The `check` action uses the same
-fail-closed persona symlink policy and validates the n8n runtime security
-invariant recursively rather than exact pre-start modes, so n8n-created `0644`
-files and `0755` directories pass while wrong owners, missing owner-write,
-missing owner-search on directories, group/world write bits, symlinks, and
-unexpected file types fail. The helper no longer silently invokes `sudo`; the
-runbook calls the privileged pre-start step explicitly. After Compose startup,
-`scripts/ms-qr1-prestart-provision.sh poststart-refresh` reruns the existing
-builder and uses the repository-supported Hermes copy path
-`docker exec ods-hermes cp /opt/hermes/docker/SOUL.md /opt/data/SOUL.md`.
-Docker availability, a running `ods-hermes` container, and a successful
-`docker exec` copy are required; failure at any of those points exits non-zero.
+`docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md` records the
+architectural decision that privileged filesystem mutation must not operate
+against container-writable persistent state while a writer container is
+running. The previous incremental hardening approach was abandoned because
+pre-scan and mutation happen at different moments in time, container-writable
+paths can change between them, root pathname resolution creates recurring
+TOCTOU variants, and the growing mitigation framework became harder to audit
+than the lifecycle boundary it was trying to replace.
+
+`scripts/ms-qr1-prestart-provision.sh prestart-init` is now the explicit
+idempotent QR1 initialization/repair gate. It runs before any Compose `up`,
+including `up --no-start`; derives the relevant writer containers from the
+rendered Compose bind mounts; fails closed before mutation if any writer of
+the affected data paths is running; ensures `data/persona` exists and is
+operator-owned; fails closed if `data/persona` or `data/persona/SOUL.md` is a
+symlink; fails safely if `data/persona/SOUL.md` is a directory; generates the
+persona through the existing `scripts/build-installation-context.py` into a
+same-directory temporary file; and atomically replaces `SOUL.md`. It resolves
+n8n's effective numeric UID/GID from the rendered Compose configuration,
+creates only `data/n8n`, and corrects only that directory tree to strict
+owner-only pre-start modes.
+
+The `check` action is intentionally read-only and suitable for the blocking
+acceptance gate. It validates the runtime invariant recursively instead of
+exact pre-start modes, so n8n-created `0644` files and `0755` directories pass
+while wrong owners, missing owner-write, missing owner-search on directories,
+group/world write bits, symlinks, and unexpected file types fail. It performs
+no chown, chmod, file replacement or repair.
+
+After Compose startup, `scripts/ms-qr1-prestart-provision.sh poststart-refresh`
+must run as the deployment user, reruns the existing builder, atomically
+replaces `data/persona/SOUL.md`, recreates `hermes` and `hermes-proxy` through
+`docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps
+--force-recreate ...`, and verifies Hermes health. It no longer uses
+`docker exec ods-hermes cp ...` because replacing the host file inode requires
+Docker to recreate the file bind mount.
 
 ### Security / privacy impact
 Positive. The fix does not widen listener scope or add external fallback
 paths. It removes a raw TCP bridge in favor of a QR1-scoped HTTP proxy with a
 fixed loopback upstream and explicit Host rewrite. The n8n ownership repair is
-scoped to the `data/n8n` tree only and does not recursively chown unrelated
-data paths or use world-writable permissions.
+scoped to the `data/n8n` tree only, is allowed only while rendered writer
+containers are stopped, and does not recursively chown unrelated data paths or
+use world-writable permissions. Runtime acceptance checks are read-only.
 Acceptance now captures `ss -tlnp` before listener parsing and fails if the
 listener snapshot cannot be collected.
 
@@ -129,7 +138,7 @@ branch.
 Pending post-merge EVO-X3 live qualification steps:
 
 1. Pull merged `ms/main`.
-2. Run corrected pre-start provisioning.
+2. Stop relevant writer containers and run corrected `prestart-init`.
 3. Replace/restart the old bridge with the reviewed HTTP proxy.
 4. Verify the proxy systemd service actually starts under its sandbox, with
    `systemctl status ms-qr1-ollama-bridge.service --no-pager` and
@@ -139,7 +148,8 @@ Pending post-merge EVO-X3 live qualification steps:
 7. Verify dashboard-api -> Ollama default-Host `/api/tags` returns HTTP `200`.
 8. Verify live streaming first-token behavior through the proxy.
 9. Verify n8n remains healthy after normalization.
-10. Verify Hermes post-start persona refresh.
+10. Verify Hermes post-start persona refresh recreates Hermes and Hermes reads
+    the refreshed persona.
 11. Verify UFW/default-deny posture is unchanged.
 12. Run full QR1 acceptance.
 
@@ -156,7 +166,7 @@ These items are pending live qualification, not PASS evidence.
 - `(cd ods && MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config)`
 - `(cd ods && python3 tests/contracts/test-network-exposure-contracts.py)`
 - `git diff --check`
-- `rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" docs/ms/ODS-MS-CHANGELOG.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md ods/scripts/ms-qr1-acceptance.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-ollama-http-proxy.py ods/scripts/ms-qr1-prestart-provision.sh ods/tests/test-ms-qr1-helpers.sh`
+- `rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" AGENTS.md docs/ms/ODS-MS-CHANGELOG.md docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md ods/scripts/ms-qr1-acceptance.sh ods/scripts/ms-qr1-ollama-bridge.sh ods/scripts/ms-qr1-ollama-http-proxy.py ods/scripts/ms-qr1-prestart-provision.sh ods/tests/test-ms-qr1-helpers.sh`
 
 ### Rollback
 Repository rollback: revert the MSODS-0011 commit.

@@ -54,18 +54,20 @@ docker network ls
 sudo ufw status numbered
 ```
 
-On a clean Ubuntu 24.04 host, install the Python YAML package and `jq` before QR1 gates:
+On a clean Ubuntu 24.04 host, install the Python YAML package, `jq`, and
+`curl` before QR1 gates:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3-yaml jq
+sudo apt-get install -y python3-yaml jq curl
 python3 -c 'import yaml; print("python3-yaml available")'
 jq --version
+curl --version
 ```
 
-Expected: Docker client/server both report versions; `python3` exists; `import yaml` succeeds; `jq --version` reports the installed jq version; UFW policy is unchanged except Docker's own chains.
+Expected: Docker client/server both report versions; `python3` exists; `import yaml` succeeds; `jq --version` and `curl --version` report installed versions; UFW policy is unchanged except Docker's own chains.
 
-Evidence: package install transcript, `docker version`, `python3 --version`, Python YAML import output, `jq --version`, `docker network ls`, and `ufw status numbered`.
+Evidence: package install transcript, `docker version`, `python3 --version`, Python YAML import output, `jq --version`, `curl --version`, `docker network ls`, and `ufw status numbered`.
 
 Rollback:
 
@@ -190,11 +192,19 @@ This section must complete before any `docker compose up`, including
 `up --no-start`, because Compose creates containers and evaluates bind mounts
 even when it does not start services.
 
+Architecture rule: privileged filesystem repair is allowed only while
+containers that can write the affected persistent state are stopped. See
+`docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md`. Runtime
+acceptance checks are read-only and must not repair ownership, permissions or
+persona files.
+
 ```bash
+docker compose $(scripts/ms-qr1-compose-flags.sh) stop n8n hermes hermes-proxy dashboard-api || true
+
 mkdir -p data/langfuse/postgres data/langfuse/clickhouse
 bash extensions/services/langfuse/hooks/post_install.sh "$PWD" "${GPU_BACKEND:-amd}"
 
-sudo scripts/ms-qr1-prestart-provision.sh
+sudo scripts/ms-qr1-prestart-provision.sh prestart-init
 test -f data/persona/SOUL.md
 python3 - <<'PY'
 from pathlib import Path
@@ -218,24 +228,28 @@ mv -f "${SDXL_FILE}.part" "$SDXL_FILE"
 
 Expected: Langfuse PostgreSQL and ClickHouse bind-mount directories are owned for their container users; SDXL Lightning checkpoint exists only after SHA256 verification succeeds.
 `data/persona/SOUL.md` is a regular UTF-8 file generated through
-`scripts/build-installation-context.py`; `data/persona/SOUL.md` is not a
-directory or symlink. `data/persona` is not a symlink. `data/n8n` exists, is
-not world-writable, and is owned by the effective n8n UID/GID rendered from the
-active Compose configuration.
+`scripts/build-installation-context.py` into a same-directory temporary file
+and atomically renamed into place; `data/persona/SOUL.md` is not a directory
+or symlink. `data/persona` is not a symlink. `data/n8n` exists, is not
+world-writable, and is owned by the effective n8n UID/GID rendered from the
+active Compose configuration. If any rendered container that can write the
+affected data path is running, `prestart-init` fails before mutation and tells
+the operator which writer must stop.
 
 Security note: the n8n ownership correction is intentionally scoped to the
 `data/n8n` tree only. The helper does not silently invoke `sudo`; this runbook
 uses `sudo` explicitly because clean-host ownership repair may require root.
 It may repair root-owned bind mount directories or files created by a failed
-first start, but it must not recursively chown the whole `data/` tree and must
-not use `chmod 777`. Directory modes are normalized separately from file modes.
-Any symlink at `data/persona`, at `data/persona/SOUL.md`, or under `data/n8n`
-is a hard error because the privileged helper must never follow a writable
-link to a host path outside the persistent tree. The pre-start provision action
-normalizes strict owner-only n8n modes before first start; later `check` runs
-accept n8n-created runtime modes such as `0644` files and `0755` directories as
-long as ownership is correct, owner write is present, and group/world write
-bits are absent.
+first start only while writer containers are stopped, but it must not
+recursively chown the whole `data/` tree and must not use `chmod 777`.
+Directory modes are normalized separately from file modes. Any symlink at
+`data/persona`, at `data/persona/SOUL.md`, or under `data/n8n` is a hard error
+because the privileged helper must never follow a writable link to a host path
+outside the persistent tree. `prestart-init` normalizes strict owner-only n8n
+modes before first start; later `check` runs are read-only and accept
+n8n-created runtime modes such as `0644` files and `0755` directories as long
+as ownership is correct, owner write and directory search are present where
+required, and group/world write bits are absent.
 
 Evidence:
 
@@ -260,7 +274,7 @@ section:
 docker compose $(scripts/ms-qr1-compose-flags.sh) stop hermes hermes-proxy
 rm -rf data/persona/SOUL.md
 sudo chown "$(id -u):$(id -g)" data/persona
-sudo scripts/ms-qr1-prestart-provision.sh
+sudo scripts/ms-qr1-prestart-provision.sh prestart-init
 ```
 
 ## 7. Create QR1 Docker Network And Fill Gateway
@@ -394,9 +408,9 @@ docker compose $(scripts/ms-qr1-compose-flags.sh) ps
 scripts/ms-qr1-prestart-provision.sh poststart-refresh
 ```
 
-Expected: approved QR1 services start. Native Ollama remains the inference path; no AMD tuning, UMA/GTT/IOMMU, Lemonade, ODS Tailscale, OpenClaw, Brave Search, ods-proxy, ODS OpenCode extension, remote-provider egress service, or remote-provider SSH tunnel starts. After services are up, the Hermes persona is refreshed again so the installation context can include running services, then the repository-supported copy path updates `/opt/data/SOUL.md` inside `ods-hermes` when the container is running.
+Expected: approved QR1 services start. Native Ollama remains the inference path; no AMD tuning, UMA/GTT/IOMMU, Lemonade, ODS Tailscale, OpenClaw, Brave Search, ods-proxy, ODS OpenCode extension, remote-provider egress service, or remote-provider SSH tunnel starts. After services are up, the Hermes persona is refreshed again as the deployment user so the installation context can include running services. The helper atomically replaces `data/persona/SOUL.md`, then uses `docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps --force-recreate hermes` and the same command for `hermes-proxy` so Docker re-establishes the file bind mount against the new inode.
 
-Evidence: `docker compose ps`, successful `scripts/ms-qr1-prestart-provision.sh poststart-refresh` output, and `docker exec ods-hermes test -f /opt/data/SOUL.md`. If Docker is unreachable, `ods-hermes` is not running, or the copy into the container fails, `poststart-refresh` must fail and the stack is not ready for acceptance evidence.
+Evidence: `docker compose ps`, successful `scripts/ms-qr1-prestart-provision.sh poststart-refresh` output, Compose recreate output for `hermes` and `hermes-proxy`, and `curl -fsS http://127.0.0.1:9119/api/status`. If Docker is unreachable, `ods-hermes` is not running before refresh, the recreate command fails, or Hermes does not return healthy, `poststart-refresh` must fail and the stack is not ready for acceptance evidence.
 
 Rollback:
 
@@ -484,6 +498,8 @@ python3 tests/contracts/test-network-exposure-contracts.py
 Expected: acceptance checks pass. Qdrant unauthenticated requests must be rejected. Hermes host port `9119` must be unbound. Local-only LiteLLM routes must have no fallback. Rendered QR1 services must match the allow-list/exclusion policy. Every rendered published QR1 service port must bind loopback. Host-agent nmcli endpoints must reject unauthenticated requests on the resolved host-agent bind address.
 The pre-start provisioning check must confirm `data/persona/SOUL.md` is a
 regular file and `data/n8n` is owned by the effective rendered n8n UID/GID.
+This check is read-only; any ownership, permission or persona repair requires
+stopping the relevant writer containers and rerunning section 6.
 
 Diagnostic, not a QR1 blocking gate:
 

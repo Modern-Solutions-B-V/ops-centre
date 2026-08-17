@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/ms-qr1-prestart-provision.sh
+  scripts/ms-qr1-prestart-provision.sh prestart-init
   scripts/ms-qr1-prestart-provision.sh check
   scripts/ms-qr1-prestart-provision.sh n8n-user
   scripts/ms-qr1-prestart-provision.sh poststart-refresh
@@ -18,12 +18,13 @@ Run from the ods/ directory after .env is filled enough for QR1 Compose render.
 USAGE
 }
 
-ACTION="${1:-provision}"
+ACTION="${1:-prestart-init}"
 case "$ACTION" in
-  provision|check|n8n-user|poststart-refresh) ;;
+  prestart-init|provision|check|n8n-user|poststart-refresh) ;;
   -h|--help|help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
+[[ "$ACTION" == "provision" ]] && ACTION="prestart-init"
 
 require() {
   command -v "$1" >/dev/null || { echo "ERROR: $1 is required" >&2; exit 1; }
@@ -57,6 +58,92 @@ compose_json() {
   require docker
   MS_QR1_HOST_GATEWAY="${MS_QR1_HOST_GATEWAY:-127.0.0.1}" \
     docker compose $(scripts/ms-qr1-compose-flags.sh) config --format json
+}
+
+writer_containers_for_data_targets() {
+  local rendered data_abs
+  rendered="$(compose_json)"
+  data_abs="$(python3 - "$DATA_DIR" <<'PY'
+from pathlib import Path
+import sys
+
+print(Path(sys.argv[1]).resolve())
+PY
+)"
+  COMPOSE_JSON="$rendered" DATA_ABS="$data_abs" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+data = json.loads(os.environ["COMPOSE_JSON"])
+data_abs = Path(os.environ["DATA_ABS"]).resolve()
+targets = [(data_abs / "n8n").resolve(), (data_abs / "persona").resolve()]
+containers = []
+
+def contains_or_is_contained(left: Path, right: Path) -> bool:
+    return left == right or left in right.parents or right in left.parents
+
+for service_name, service in sorted(data.get("services", {}).items()):
+    for volume in service.get("volumes") or []:
+        source = None
+        read_only = False
+        if isinstance(volume, str):
+            parts = volume.split(":")
+            if len(parts) >= 2:
+                source = parts[0]
+                read_only = "ro" in parts[2:]
+        elif isinstance(volume, dict) and volume.get("type") == "bind":
+            source = volume.get("source")
+            read_only = bool(volume.get("read_only"))
+        if not source or read_only:
+            continue
+        source_path = Path(source)
+        if not source_path.is_absolute():
+            parts = source_path.parts
+            if parts and parts[0] in {".", "data"}:
+                parts = tuple(part for part in parts if part != ".")
+            if parts and parts[0] == "data":
+                source_path = data_abs.joinpath(*parts[1:])
+            else:
+                source_path = Path.cwd() / source_path
+        try:
+            source_abs = source_path.resolve()
+        except FileNotFoundError:
+            source_abs = source_path.absolute()
+        if any(contains_or_is_contained(source_abs, target) for target in targets):
+            containers.append(str(service.get("container_name") or f"ods-{service_name}"))
+            break
+
+for name in sorted(set(containers)):
+    print(name)
+PY
+}
+
+require_quiescent_data_writers() {
+  # ADR: docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md.
+  # Privileged repair is only allowed while containers that can write the
+  # affected persistent data paths are stopped; runtime checks stay read-only.
+  require docker
+  local expected running active
+  expected="$(writer_containers_for_data_targets)"
+  [[ -n "$expected" ]] || return 0
+  running="$(docker ps --format '{{.Names}}')"
+  active="$(EXPECTED_WRITERS="$expected" RUNNING_CONTAINERS="$running" python3 - <<'PY'
+import os
+
+expected = set(filter(None, os.environ["EXPECTED_WRITERS"].splitlines()))
+running = set(filter(None, os.environ["RUNNING_CONTAINERS"].splitlines()))
+for name in sorted(expected & running):
+    print(name)
+PY
+)"
+  if [[ -n "$active" ]]; then
+    echo "ERROR: privileged QR1 prestart-init requires quiescent container-writable state." >&2
+    echo "Stop these writer container(s) before repair:" >&2
+    printf '  %s\n' $active >&2
+    echo "Run: docker stop $(printf '%s\n' "$active" | tr '\n' ' ')" >&2
+    return 1
+  fi
 }
 
 resolve_n8n_user() {
@@ -116,6 +203,11 @@ ensure_persona() {
   local persona_owner
   persona_owner="$(path_owner_mode "$PERSONA_DIR")"
   if [[ "$persona_owner" != "$DEPLOY_UID:$DEPLOY_GID:"* ]]; then
+    if [[ "$ACTION" == "poststart-refresh" ]]; then
+      echo "ERROR: $PERSONA_DIR owner is $persona_owner, expected $DEPLOY_UID:$DEPLOY_GID" >&2
+      echo "Post-start refresh is intentionally unprivileged; stop the stack and rerun prestart-init with sudo if repair is required." >&2
+      return 1
+    fi
     is_root || require_root "$PERSONA_DIR owner is $persona_owner, expected $DEPLOY_UID:$DEPLOY_GID"
     chown "$DEPLOY_UID:$DEPLOY_GID" "$PERSONA_DIR"
   fi
@@ -127,7 +219,9 @@ ensure_persona() {
   fi
   reject_symlink "$SOUL_PATH"
   local soul_tmp
-  soul_tmp="$(mktemp "${TMPDIR:-/tmp}/ms-qr1-soul.XXXXXX")"
+  # Build to a same-directory temp file and atomically replace SOUL.md so
+  # Hermes never observes a partial persona and bind-mount creation sees a file.
+  soul_tmp="$(mktemp "$PERSONA_DIR/.SOUL.md.tmp.XXXXXX")"
   trap 'rm -f "$soul_tmp"' RETURN
   python3 scripts/build-installation-context.py --output "$soul_tmp"
   if [[ ! -f "$soul_tmp" || -L "$soul_tmp" ]]; then
@@ -150,8 +244,6 @@ persona_dir = os.environ["PERSONA_DIR"]
 soul_tmp = os.environ["SOUL_TMP"]
 deploy_uid = int(os.environ["DEPLOY_UID"])
 deploy_gid = int(os.environ["DEPLOY_GID"])
-race_mode = os.environ.get("MS_QR1_TEST_PERSONA_RACE", "")
-race_external = os.environ.get("MS_QR1_TEST_PERSONA_RACE_EXTERNAL", "")
 open_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 dir_flags = open_flags | getattr(os, "O_DIRECTORY", 0)
 
@@ -187,20 +279,6 @@ try:
             fail(f"{persona_dir}/SOUL.md is a directory, probably created by a previous failed Docker bind mount.")
         if not stat.S_ISREG(existing.st_mode):
             fail(f"{persona_dir}/SOUL.md is not a regular file")
-    if race_mode:
-        if not race_external:
-            fail("MS_QR1_TEST_PERSONA_RACE_EXTERNAL is required for race fixture")
-        if race_mode == "soul-symlink":
-            try:
-                os.rename("SOUL.md", "SOUL.md.race-original", src_dir_fd=persona_fd, dst_dir_fd=persona_fd)
-            except FileNotFoundError:
-                pass
-            os.symlink(race_external, os.path.join(persona_dir, "SOUL.md"))
-        elif race_mode == "persona-dir-swap":
-            os.rename(persona_dir, f"{persona_dir}.race-original")
-            os.symlink(race_external, persona_dir)
-        else:
-            fail(f"unknown persona race fixture {race_mode!r}")
     if os.geteuid() == 0:
         os.chown(soul_tmp, deploy_uid, deploy_gid, follow_symlinks=False)
     os.chmod(soul_tmp, 0o644, follow_symlinks=False)
@@ -227,12 +305,9 @@ expected_uid = int(os.environ["N8N_UID"])
 expected_gid = int(os.environ["N8N_GID"])
 normalize = os.environ["N8N_NORMALIZE"] == "1"
 force_chmod_not_implemented = os.environ.get("MS_QR1_TEST_CHMOD_NO_FOLLOW_UNSUPPORTED") == "1"
-race_mode = os.environ.get("MS_QR1_TEST_N8N_RACE", "")
-race_external = os.environ.get("MS_QR1_TEST_N8N_RACE_EXTERNAL", "")
 running_as_root = os.geteuid() == 0
 open_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 dir_flags = open_flags | getattr(os, "O_DIRECTORY", 0)
-race_fired = False
 
 def fail(message: str) -> None:
     print(f"ERROR: {message}", file=sys.stderr)
@@ -245,28 +320,6 @@ def desired_mode(path: str, st: os.stat_result) -> int:
     if stat.S_ISREG(st.st_mode):
         return 0o600 | (mode & stat.S_IXUSR)
     fail(f"{path} is neither a directory nor a regular file")
-
-def same_object(left: os.stat_result, right: os.stat_result) -> bool:
-    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
-
-def trigger_race(parent_display: str, name: str, phase: str) -> None:
-    global race_fired
-    if race_fired or not race_mode:
-        return
-    if not race_external:
-        fail("MS_QR1_TEST_N8N_RACE_EXTERNAL is required for race fixture")
-    parent_path = os.path.join(root, os.path.relpath(parent_display, root)) if parent_display != root else root
-    if race_mode == "parent-swap" and parent_display == root and name == "nested" and phase == "before-open":
-        os.rename(os.path.join(parent_path, name), os.path.join(parent_path, f"{name}.race-original"))
-        os.symlink(race_external, os.path.join(parent_path, name))
-        race_fired = True
-    elif race_mode == "final-swap" and parent_display.endswith("/nested") and name == "blob" and phase == "before-open":
-        os.rename(os.path.join(parent_path, name), os.path.join(parent_path, f"{name}.race-original"))
-        os.symlink(race_external, os.path.join(parent_path, name))
-        race_fired = True
-    elif race_mode == "symlink-insert" and parent_display == root and phase == "before-rescan":
-        os.symlink(race_external, os.path.join(parent_path, "inserted-race-link"))
-        race_fired = True
 
 def apply_or_check(fd: int, display: str, st: os.stat_result) -> None:
     desired = desired_mode(display, st)
@@ -300,7 +353,6 @@ def apply_or_check(fd: int, display: str, st: os.stat_result) -> None:
 
 def open_child(parent_fd: int, parent_display: str, name: str) -> tuple[int, os.stat_result]:
     display = os.path.join(parent_display, name)
-    trigger_race(parent_display, name, "before-open")
     try:
         st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     except FileNotFoundError:
@@ -331,9 +383,6 @@ def open_child(parent_fd: int, parent_display: str, name: str) -> tuple[int, os.
             fail(f"{display} disappeared during traversal")
         fail(f"cannot open {display} safely: {exc.strerror}")
     opened_st = os.fstat(child_fd)
-    if not same_object(st, opened_st):
-        os.close(child_fd)
-        fail(f"{display} changed during traversal")
     return child_fd, opened_st
 
 def visit_dir(dir_fd: int, display: str, st: os.stat_result) -> None:
@@ -358,13 +407,6 @@ def visit_dir(dir_fd: int, display: str, st: os.stat_result) -> None:
                 fail(f"{child_display} is neither a directory nor a regular file")
         finally:
             os.close(child_fd)
-    trigger_race(display, "", "before-rescan")
-    try:
-        after_names = sorted(os.listdir(dir_fd))
-    except OSError as exc:
-        fail(f"cannot relist {display}: {exc.strerror}")
-    if after_names != names:
-        fail(f"{display} changed during traversal")
 
 try:
     root_fd = os.open(root, dir_flags)
@@ -429,15 +471,25 @@ if [[ "$ACTION" == "check" ]]; then
 fi
 
 poststart_refresh() {
+  if is_root; then
+    echo "ERROR: poststart-refresh must run as the deployment user, not root." >&2
+    echo "It refreshes deployment-user-owned persona state and must not perform privileged filesystem repair." >&2
+    return 1
+  fi
+  # Same-directory atomic replacement changes SOUL.md's inode. Recreate Hermes
+  # so Docker establishes a fresh file bind mount for the updated persona.
   ensure_persona
   require docker
+  require curl
   local containers
   containers="$(docker ps --format '{{.Names}}')"
   if ! grep -Fx 'ods-hermes' <<<"$containers" >/dev/null; then
     echo "ERROR: ods-hermes is not running; cannot refresh Hermes persona" >&2
     return 1
   fi
-  docker exec ods-hermes cp /opt/hermes/docker/SOUL.md /opt/data/SOUL.md
+  docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps --force-recreate hermes
+  docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps --force-recreate hermes-proxy
+  curl -fsS --max-time 30 http://127.0.0.1:9119/api/status >/dev/null
 }
 
 if [[ "$ACTION" == "poststart-refresh" ]]; then
@@ -445,6 +497,7 @@ if [[ "$ACTION" == "poststart-refresh" ]]; then
   exit 0
 fi
 
+require_quiescent_data_writers
 ensure_persona
 ensure_n8n_dir
 check_prestart
