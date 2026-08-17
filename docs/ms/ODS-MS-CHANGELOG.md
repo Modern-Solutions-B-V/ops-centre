@@ -80,6 +80,29 @@ which scoped services are operator-facing versus internal. The new read-only
 auth/bootstrap readiness, canonical operator URLs, dependency status and next
 actions.
 
+The readiness verdict is intentionally conservative:
+
+- container health uses exact state/health values and cannot treat
+  `unhealthy`, `starting` or `exited` services as ready;
+- normal functional probes require the capability-specific expected status,
+  usually HTTP `2xx`; arbitrary `4xx` is not globally successful;
+- Hermes keeps only the reviewed unauthenticated denial contract, including
+  `401`/`403`/`404` and exact `303 Location: /auth/required`;
+- loopback probes use a no-proxy urllib opener so `HTTP_PROXY` and
+  `HTTPS_PROXY` cannot receive local readiness traffic or auth headers;
+- required probe credentials such as Qdrant, Privacy Shield, Token Spy,
+  LiteLLM and Dashboard API keys must be configured, but their values are never
+  printed;
+- Open WebUI readiness requires a read-only inspection proving at least one
+  persisted `role='admin'` user in `data/open-webui/webui.db`; configured
+  bootstrap env values alone are not treated as completed bootstrap.
+
+QR1 detection remains `MS_QR1_HOST_GATEWAY`. Review re-evaluated the proposed
+dedicated mode marker and left the current signal unchanged because QR1 compose
+rendering requires the gateway, dashboard-api reads the persisted QR1 `.env`,
+and a generic install would only enter the safer registration-only path by
+deliberately setting the MS-specific QR1 gateway signal.
+
 ### Security / operational impact
 Positive. The change does not expose new host ports, alter Tailscale Serve,
 change UFW, change the Ollama bridge, or weaken quiescent provisioning. It
@@ -91,11 +114,19 @@ Phase 2 prompt/workflow/agent testing.
 On EVO-X3 after merge:
 
 1. Pull reviewed `ms/main`.
-2. Add the Open WebUI first-admin email and password to `ods/.env` using the
-   existing secret-handling process.
-3. Recreate only `open-webui` so the supported bootstrap variables are read.
-4. Run `scripts/ms-qr1-operator-readiness.sh`.
-5. Continue to Phase 2 functional testing only after readiness is green.
+2. If generic onboarding already created
+   `extensions/services/langfuse/compose.yaml`, verify it is untracked, remove
+   only that untracked repository file, restore
+   `extensions/services/langfuse/compose.yaml.disabled` from `origin/ms/main`,
+   verify no mixed active+disabled state exists, and rerun
+   `scripts/ms-qr1-compose-flags.sh` plus `docker compose ... config`.
+3. Add `MS_QR1_TAILSCALE_HOSTNAME` plus the Open WebUI first-admin email and
+   password to `ods/.env` using the existing secret-handling process.
+4. Recreate only `open-webui` so the supported bootstrap variables are read.
+5. Run `scripts/ms-qr1-operator-readiness.sh`.
+6. Rerun the blocking acceptance gate:
+   `sudo EXPECTED_MODEL=qwen3.8:27b ENV_FILE="$PWD/.env" scripts/ms-qr1-acceptance.sh`.
+7. Continue to Phase 2 functional testing only after both gates are green.
 
 If first boot was already completed through generic onboarding, ensure the
 repository checkout is restored to the merged QR1 state before running
@@ -116,14 +147,16 @@ state.
 - `(cd ods && MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config >/tmp/qr1-operator-compose.rendered.yml)`
 - `python3 ods/tests/contracts/test-network-exposure-contracts.py`
 - `git diff --check`
-- `if rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" docs/ms/ODS-MS-CHANGELOG.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md docs/ms/backlog/QR2-BACKLOG.md ods/docker-compose.ms-qr1.yml ods/profiles/ms-qr1.env.example ods/.env.schema.json ods/config/ms-qr1/operator-access.json ods/scripts/ms-qr1-operator-readiness.py ods/scripts/ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-helpers.sh ods/extensions/services/dashboard-api/config.py ods/extensions/services/dashboard-api/routers/setup.py ods/extensions/services/dashboard-api/routers/templates.py ods/extensions/services/dashboard-api/tests/test_setup.py ods/extensions/services/dashboard-api/tests/test_templates.py ods/extensions/services/dashboard/src/App.jsx ods/extensions/services/dashboard/src/hooks/useFirstRun.js ods/extensions/services/dashboard/src/pages/FirstBoot.jsx ods/extensions/services/dashboard/src/pages/FirstBoot.test.jsx | grep -v GENERATE_ME | grep -v "_PORT=" | grep -v "assert_contains 'OPEN_WEBUI_ADMIN_PASSWORD='"; then exit 1; fi`
+- `if rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" docs/ms/ODS-MS-CHANGELOG.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md docs/ms/backlog/QR2-BACKLOG.md ods/docker-compose.ms-qr1.yml ods/profiles/ms-qr1.env.example ods/.env.schema.json ods/config/ms-qr1/operator-access.json ods/scripts/ms-qr1-operator-readiness.py ods/scripts/ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-helpers.sh ods/extensions/services/dashboard-api/config.py ods/extensions/services/dashboard-api/routers/setup.py ods/extensions/services/dashboard-api/routers/templates.py ods/extensions/services/dashboard-api/tests/test_setup.py ods/extensions/services/dashboard-api/tests/test_templates.py ods/extensions/services/dashboard/src/App.jsx ods/extensions/services/dashboard/src/hooks/useFirstRun.js ods/extensions/services/dashboard/src/pages/FirstBoot.jsx ods/extensions/services/dashboard/src/pages/FirstBoot.test.jsx | grep -v GENERATE_ME | grep -v "_PORT=" | grep -v "OPEN_WEBUI_ADMIN_PASSWORD" | grep -v "LANGFUSE_INIT_USER_PASSWORD" | grep -v "MS_QR1_READINESS_STATUS_" | grep -v "printf '%s%s%s" | grep -v 'QDRANT_" "API_KEY'; then exit 1; fi`
 
 ### Rollback
 Repository rollback: revert this commit. Host rollback: remove the QR1 Open
-WebUI first-admin values from `.env` if they were added for a fresh bootstrap,
-then recreate only `open-webui` if the operator wants to return to the previous
-unbootstrapped behavior. Do not enable signup or expose public Open WebUI
-signup during rollback.
+WebUI first-admin values from `.env` only to stop future env-driven bootstrap
+attempts. That does not remove an admin already persisted in
+`data/open-webui/webui.db`; normal rollback preserves persistent users.
+Destructive user/database rollback requires a separate reviewed quiescent
+restore/removal procedure. Do not enable signup, expose public Open WebUI
+signup, or casually delete the database during rollback.
 
 ---
 

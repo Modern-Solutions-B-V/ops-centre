@@ -6,7 +6,7 @@
       "id": "dashboard",
       "capability": "ODS Dashboard / Control Centre",
       "services": ["dashboard", "dashboard-api"],
-      "canonical_url": "https://${MS_QR1_TAILSCALE_HOSTNAME:-evox3.tailfc79e6.ts.net}",
+      "canonical_url": "https://${MS_QR1_TAILSCALE_HOSTNAME}",
       "local_url": "http://127.0.0.1:${DASHBOARD_PORT:-3001}/",
       "remote_access": "Tailscale Serve HTTPS 443 to loopback dashboard",
       "auth_contract": "dashboard API key at reverse proxy plus ods-session for protected flows"
@@ -15,7 +15,7 @@
       "id": "open-webui",
       "capability": "Open WebUI",
       "services": ["open-webui", "litellm"],
-      "canonical_url": "https://${MS_QR1_TAILSCALE_HOSTNAME:-evox3.tailfc79e6.ts.net}:8443",
+      "canonical_url": "https://${MS_QR1_TAILSCALE_HOSTNAME}:8443",
       "local_url": "http://127.0.0.1:${WEBUI_PORT:-3000}/",
       "remote_access": "Tailscale Serve HTTPS 8443 to loopback Open WebUI",
       "auth_contract": "WEBUI_AUTH true, signup disabled, headless first-admin env"
@@ -60,9 +60,9 @@
       "id": "hermes",
       "capability": "Hermes Operator Surface",
       "services": ["hermes", "hermes-proxy", "dashboard-api"],
-      "canonical_url": "https://${MS_QR1_TAILSCALE_HOSTNAME:-evox3.tailfc79e6.ts.net}/auth/required",
+      "canonical_url": "",
       "local_url": "http://127.0.0.1:${HERMES_PROXY_PORT:-9120}/",
-      "remote_access": "Dashboard-origin authenticated Hermes proxy; no host 9119 listener",
+      "remote_access": "No QR1 Hermes remote route approved by default; no host 9119 listener",
       "auth_contract": "Caddy forward_auth via dashboard-api ods-session"
     }
   ]

@@ -17,7 +17,7 @@ Acceptance:
 
 Classification: CONFIGURE preferred.
 
-QR1 operator readiness classifies n8n, Langfuse, Perplexica and ComfyUI as
+QR1 operator readiness classifies Hermes, n8n, Langfuse, Perplexica and ComfyUI as
 operator-facing capabilities but does not approve new Tailscale Serve routes
 for them by default. Dashboard and the temporary Open WebUI private route are
 the only canonical MacBook launch URLs introduced during the QR1 readiness

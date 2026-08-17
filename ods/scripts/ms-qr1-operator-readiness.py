@@ -10,17 +10,23 @@ import re
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import ProxyHandler, Request, build_opener
 
 
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY = ROOT / "config" / "ms-qr1" / "operator-access.json"
 ENV_FILE = Path(os.environ.get("ENV_FILE", ROOT / ".env"))
+DATA_DIR = Path(os.environ.get("MS_QR1_READINESS_DATA_DIR", ROOT / "data"))
 TIMEOUT = float(os.environ.get("MS_QR1_READINESS_TIMEOUT", "5"))
+NO_PROXY_OPENER = build_opener(ProxyHandler({}))
+READY_HEALTH = {"healthy", "running_without_healthcheck", "external"}
+SAFE_HTTP_2XX = tuple(range(200, 300))
+HERMES_DENIAL_STATUSES = (401, 403, 404)
 
 
 @dataclass(frozen=True)
@@ -29,34 +35,153 @@ class Capability:
     services: tuple[str, ...]
     role: str
     local_url: str
-    canonical_url: str
     auth: str
     dependencies: tuple[str, ...] = ()
-    probe_path: str = ""
     probe_auth: str = "none"
+    expected_statuses: tuple[int, ...] = SAFE_HTTP_2XX
+    required_env: tuple[str, ...] = ()
+    allow_empty_probe: bool = False
+
+    @property
+    def key(self) -> str:
+        return re.sub(r"[^A-Z0-9]+", "_", self.capability.upper()).strip("_")
 
 
 CAPABILITIES = (
-    Capability("ODS Dashboard / Control Centre", ("dashboard", "dashboard-api"), "operator-facing", "http://127.0.0.1:${DASHBOARD_PORT:-3001}/", "", "setup sentinel and API auth configured", ("dashboard-api",), "/"),
-    Capability("Open WebUI", ("open-webui",), "operator-facing", "http://127.0.0.1:${WEBUI_PORT:-3000}/", "", "WEBUI_AUTH true, signup disabled, initial admin present or configured", ("litellm",), "/health"),
-    Capability("Hermes Operator Surface", ("hermes", "hermes-proxy"), "operator-facing", "http://127.0.0.1:${HERMES_PROXY_PORT:-9120}/", "", "unauthenticated requests denied or redirected to /auth/required", ("dashboard-api", "litellm", "searxng"), "/api/pty"),
-    Capability("n8n Workflows", ("n8n",), "operator-facing", "http://127.0.0.1:${N8N_PORT:-5678}/healthz", "", "credentials configured in .env", (), ""),
-    Capability("Langfuse Observability", ("langfuse", "langfuse-worker", "langfuse-postgres", "langfuse-clickhouse", "langfuse-redis", "langfuse-minio"), "operator-facing", "http://127.0.0.1:${LANGFUSE_PORT:-3006}/api/public/health", "", "init credentials configured in .env", ("litellm",), ""),
-    Capability("Perplexica Research", ("perplexica",), "operator-facing", "http://127.0.0.1:${PERPLEXICA_PORT:-3004}/", "", "loopback-only UI", ("searxng", "litellm"), ""),
-    Capability("ComfyUI Image Generation", ("comfyui",), "operator-facing", "http://127.0.0.1:${COMFYUI_PORT:-8188}/", "", "loopback-only UI", (), ""),
-    Capability("LiteLLM Gateway", ("litellm",), "internal-platform", "http://127.0.0.1:${LITELLM_PORT:-4000}/health/readiness", "", "Bearer LITELLM_KEY for API clients", ("ollama-host",), ""),
-    Capability("Ollama Host Route", ("ms-qr1-ollama-bridge",), "internal-platform", "http://127.0.0.1:11434/api/tags", "", "loopback Ollama plus gateway-only HTTP bridge", (), ""),
-    Capability("Model Router", ("model-router",), "internal-platform", "", "", "internal service, no QR1 operator route", (), ""),
-    Capability("Qdrant Vector Store", ("qdrant",), "internal-platform", "http://127.0.0.1:${QDRANT_PORT:-6333}/collections", "", "QDRANT_API_KEY required", ("embeddings",), "", "qdrant"),
-    Capability("TEI Embeddings", ("embeddings",), "internal-platform", "http://127.0.0.1:${EMBEDDINGS_PORT:-8090}/health", "", "internal embedding endpoint", (), ""),
-    Capability("SearXNG Search", ("searxng",), "internal-platform", "http://127.0.0.1:${SEARXNG_PORT:-8888}/healthz", "", "internal search backend", (), ""),
-    Capability("Privacy Shield", ("privacy-shield",), "internal-platform", "http://127.0.0.1:${SHIELD_PORT:-8085}/health", "", "SHIELD_API_KEY for protected routes", ("litellm",), ""),
-    Capability("Token Spy", ("token-spy",), "internal-platform", "http://127.0.0.1:${TOKEN_SPY_PORT:-3005}/health", "", "TOKEN_SPY_API_KEY for telemetry routes", (), ""),
-    Capability("APE Policy Engine", ("ape",), "internal-platform", "http://127.0.0.1:${APE_PORT:-7890}/health", "", "internal policy endpoint", (), ""),
-    Capability("Whisper STT", ("whisper",), "internal-platform", "http://127.0.0.1:${WHISPER_PORT:-9000}/health", "", "internal OpenAI-compatible audio endpoint", ("open-webui",), ""),
-    Capability("Kokoro TTS", ("tts",), "internal-platform", "http://127.0.0.1:${TTS_PORT:-8880}/health", "", "internal OpenAI-compatible speech endpoint", ("open-webui",), ""),
-    Capability("Dashboard API", ("dashboard-api",), "internal-platform", "http://127.0.0.1:${DASHBOARD_API_PORT:-3002}/health", "", "DASHBOARD_API_KEY protected API", (), ""),
+    Capability(
+        "ODS Dashboard / Control Centre",
+        ("dashboard", "dashboard-api"),
+        "operator-facing",
+        "http://127.0.0.1:${DASHBOARD_PORT:-3001}/",
+        "DASHBOARD_API_KEY configured; dashboard UI reachable",
+        ("dashboard-api",),
+        required_env=("DASHBOARD_API_KEY",),
+    ),
+    Capability(
+        "Open WebUI",
+        ("open-webui",),
+        "operator-facing",
+        "http://127.0.0.1:${WEBUI_PORT:-3000}/health",
+        "WEBUI_AUTH true, signup disabled, at least one admin exists",
+        ("litellm",),
+        required_env=("LITELLM_KEY",),
+    ),
+    Capability(
+        "Hermes Operator Surface",
+        ("hermes", "hermes-proxy"),
+        "operator-facing",
+        "http://127.0.0.1:${HERMES_PROXY_PORT:-9120}/api/pty",
+        "unauthenticated access denied by reviewed Hermes proxy contract",
+        ("dashboard-api", "litellm", "searxng"),
+        expected_statuses=HERMES_DENIAL_STATUSES,
+        required_env=("DASHBOARD_API_KEY", "LITELLM_KEY"),
+    ),
+    Capability(
+        "n8n Workflows",
+        ("n8n",),
+        "operator-facing",
+        "http://127.0.0.1:${N8N_PORT:-5678}/healthz",
+        "n8n credentials configured in .env",
+        required_env=("N8N_USER", "N8N_PASS"),
+    ),
+    Capability(
+        "Langfuse Observability",
+        ("langfuse", "langfuse-worker", "langfuse-postgres", "langfuse-clickhouse", "langfuse-redis", "langfuse-minio"),
+        "operator-facing",
+        "http://127.0.0.1:${LANGFUSE_PORT:-3006}/api/public/health",
+        "Langfuse init credentials configured in .env",
+        ("litellm",),
+        required_env=("LANGFUSE_INIT_USER_EMAIL", "LANGFUSE_INIT_USER_PASSWORD", "LITELLM_KEY"),
+    ),
+    Capability(
+        "Perplexica Research",
+        ("perplexica",),
+        "operator-facing",
+        "http://127.0.0.1:${PERPLEXICA_PORT:-3004}/",
+        "loopback-only UI",
+        ("searxng", "litellm"),
+        required_env=("LITELLM_KEY",),
+    ),
+    Capability(
+        "ComfyUI Image Generation",
+        ("comfyui",),
+        "operator-facing",
+        "http://127.0.0.1:${COMFYUI_PORT:-8188}/",
+        "loopback-only UI",
+    ),
+    Capability(
+        "LiteLLM Gateway",
+        ("litellm",),
+        "internal-platform",
+        "http://127.0.0.1:${LITELLM_PORT:-4000}/health/readiness",
+        "LITELLM_KEY configured for API clients",
+        ("ollama-host",),
+        required_env=("LITELLM_KEY",),
+    ),
+    Capability(
+        "Ollama Host Route",
+        ("ms-qr1-ollama-bridge",),
+        "internal-platform",
+        "http://127.0.0.1:11434/api/tags",
+        "loopback Ollama plus gateway-only HTTP bridge",
+    ),
+    Capability(
+        "Model Router",
+        ("model-router",),
+        "internal-platform",
+        "",
+        "internal service, no QR1 operator route",
+        allow_empty_probe=True,
+    ),
+    Capability(
+        "Qdrant Vector Store",
+        ("qdrant",),
+        "internal-platform",
+        "http://127.0.0.1:${QDRANT_PORT:-6333}/collections",
+        "QDRANT_API_KEY configured and used only for loopback probe",
+        ("embeddings",),
+        probe_auth="qdrant",
+        required_env=("QDRANT_API_KEY",),
+    ),
+    Capability("TEI Embeddings", ("embeddings",), "internal-platform", "http://127.0.0.1:${EMBEDDINGS_PORT:-8090}/health", "internal embedding endpoint"),
+    Capability("SearXNG Search", ("searxng",), "internal-platform", "http://127.0.0.1:${SEARXNG_PORT:-8888}/healthz", "internal search backend"),
+    Capability(
+        "Privacy Shield",
+        ("privacy-shield",),
+        "internal-platform",
+        "http://127.0.0.1:${SHIELD_PORT:-8085}/health",
+        "SHIELD_API_KEY configured for protected routes",
+        ("litellm",),
+        required_env=("SHIELD_API_KEY", "LITELLM_KEY"),
+    ),
+    Capability(
+        "Token Spy",
+        ("token-spy",),
+        "internal-platform",
+        "http://127.0.0.1:${TOKEN_SPY_PORT:-3005}/health",
+        "TOKEN_SPY_API_KEY configured for telemetry routes",
+        required_env=("TOKEN_SPY_API_KEY",),
+    ),
+    Capability("APE Policy Engine", ("ape",), "internal-platform", "http://127.0.0.1:${APE_PORT:-7890}/health", "internal policy endpoint"),
+    Capability("Whisper STT", ("whisper",), "internal-platform", "http://127.0.0.1:${WHISPER_PORT:-9000}/health", "internal OpenAI-compatible audio endpoint", ("open-webui",)),
+    Capability("Kokoro TTS", ("tts",), "internal-platform", "http://127.0.0.1:${TTS_PORT:-8880}/health", "internal OpenAI-compatible speech endpoint", ("open-webui",)),
+    Capability(
+        "Dashboard API",
+        ("dashboard-api",),
+        "internal-platform",
+        "http://127.0.0.1:${DASHBOARD_API_PORT:-3002}/health",
+        "DASHBOARD_API_KEY configured",
+        required_env=("DASHBOARD_API_KEY",),
+    ),
 )
+
+
+@dataclass
+class ProbeResult:
+    ok: bool
+    reason: str
+    status: Optional[int] = None
+    headers: dict[str, list[str]] = field(default_factory=dict)
 
 
 def read_env(path: Path = ENV_FILE) -> dict[str, str]:
@@ -71,7 +196,12 @@ def read_env(path: Path = ENV_FILE) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip().strip("\"'")
-    values.update({key: value for key, value in os.environ.items() if key.startswith(("MS_QR1_", "OPEN_WEBUI_", "WEBUI_", "LITELLM_", "QDRANT_", "SHIELD_", "TOKEN_SPY_", "DASHBOARD_", "N8N_", "LANGFUSE_", "APE_"))})
+    prefixes = (
+        "MS_QR1_", "OPEN_WEBUI_", "WEBUI_", "LITELLM_", "QDRANT_",
+        "SHIELD_", "TOKEN_SPY_", "DASHBOARD_", "N8N_", "LANGFUSE_",
+        "APE_", "COMFYUI_", "PERPLEXICA_", "SEARXNG_", "WHISPER_", "TTS_",
+    )
+    values.update({key: value for key, value in os.environ.items() if key.startswith(prefixes)})
     return values
 
 
@@ -85,16 +215,57 @@ def expand(value: str, env: dict[str, str]) -> str:
     return pattern.sub(repl, value)
 
 
+def valid_url_or_empty(value: str) -> str:
+    candidate = value.strip()
+    if not candidate:
+        return ""
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or "${" in candidate:
+        return ""
+    if parsed.hostname in {"", None}:
+        return ""
+    return candidate
+
+
+def load_registry() -> dict[str, Any]:
+    return json.loads(REGISTRY.read_text(encoding="utf-8"))
+
+
 def load_operator_urls(env: dict[str, str]) -> dict[str, str]:
-    data = json.loads(REGISTRY.read_text(encoding="utf-8"))
-    return {
-        item["capability"]: expand(str(item.get("canonical_url", "")), env)
-        for item in data.get("operator_surfaces", [])
-    }
+    data = load_registry()
+    urls: dict[str, str] = {}
+    for item in data.get("operator_surfaces", []):
+        urls[str(item["capability"])] = valid_url_or_empty(expand(str(item.get("canonical_url", "")), env))
+    return urls
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
+
+
+def normalize_health(item: dict[str, Any]) -> str:
+    raw_service = str(item.get("Service") or item.get("Name") or item.get("service") or "")
+    state = str(item.get("State") or item.get("state") or "").strip().lower()
+    health = str(item.get("Health") or item.get("health") or "").strip().lower()
+    status = str(item.get("Status") or item.get("status") or "").strip().lower()
+
+    if state in {"exited", "dead", "created", "removing", "paused"}:
+        return "exited/stopped"
+    if any(token in status for token in ("exited", "dead", "created")):
+        return "exited/stopped"
+    if health == "healthy":
+        return "healthy"
+    if health == "starting":
+        return "starting"
+    if health == "unhealthy":
+        return "unhealthy"
+    if state == "running" or status.startswith("up"):
+        if health in {"", "none", "null"}:
+            return "running_without_healthcheck"
+        return health or "running_without_healthcheck"
+    if raw_service:
+        return state or status or "unknown"
+    return "unknown"
 
 
 def compose_ps() -> dict[str, str]:
@@ -111,95 +282,161 @@ def compose_ps() -> dict[str, str]:
             return {}
         text = result.stdout
 
-    services: dict[str, str] = {}
     stripped = text.strip()
     if not stripped:
-        return services
+        return {}
     try:
         parsed = json.loads(stripped)
         entries = parsed if isinstance(parsed, list) else [parsed]
     except json.JSONDecodeError:
         entries = [json.loads(line) for line in stripped.splitlines() if line.strip()]
+
+    services: dict[str, str] = {}
     for item in entries:
         service = str(item.get("Service") or item.get("Name") or item.get("service") or "")
-        state = str(item.get("State") or item.get("Status") or item.get("Health") or "").lower()
-        health = str(item.get("Health") or "").lower()
-        status = "healthy" if "healthy" in (health or state) else ("running" if "running" in state or "up" in state else state or "unknown")
         if service:
-            services[service] = status
+            services[service] = normalize_health(item)
     return services
 
 
-def http_probe(url: str, env: dict[str, str], auth: str = "none") -> tuple[bool, str]:
+def fixture_status_for(capability: Capability) -> Optional[int]:
+    value = os.environ.get(f"MS_QR1_READINESS_STATUS_{capability.key}")
+    if not value:
+        return None
+    return int(value)
+
+
+def http_probe(url: str, env: dict[str, str], capability: Capability) -> ProbeResult:
     if not url:
-        return True, "no external probe required"
+        if capability.allow_empty_probe:
+            return ProbeResult(True, "no live probe required")
+        return ProbeResult(False, "probe URL is not configured")
+
+    fixture_status = fixture_status_for(capability)
+    if fixture_status is not None:
+        ok = fixture_status in capability.expected_statuses
+        return ProbeResult(ok, f"HTTP {fixture_status}", fixture_status)
+
     headers = {}
-    if auth == "qdrant" and env.get("QDRANT_API_KEY"):
-        headers["api-key"] = env["QDRANT_API_KEY"]
-    req = Request(url, headers=headers)
+    if capability.probe_auth == "qdrant":
+        token = env.get("QDRANT_API_KEY", "")
+        if token:
+            headers["api-key"] = token
+    request = Request(url, headers=headers)
     try:
-        with urlopen(req, timeout=TIMEOUT) as response:
+        with NO_PROXY_OPENER.open(request, timeout=TIMEOUT) as response:
             code = response.getcode()
+            headers_by_name = {
+                key.lower(): response.headers.get_all(key) or []
+                for key in response.headers.keys()
+            }
     except HTTPError as exc:
         code = exc.code
+        headers_by_name = {
+            key.lower(): exc.headers.get_all(key) or []
+            for key in exc.headers.keys()
+        }
     except (OSError, URLError) as exc:
-        return False, f"probe failed: {exc}"
-    if 200 <= code < 500:
-        return True, f"HTTP {code}"
-    return False, f"HTTP {code}"
+        return ProbeResult(False, f"probe failed: {exc}")
+    if capability.capability == "Hermes Operator Surface" and code == 303:
+        locations = headers_by_name.get("location", [])
+        ok = len(locations) == 1 and locations[0].strip() == "/auth/required"
+        if ok:
+            return ProbeResult(True, "HTTP 303 Location /auth/required", code, headers_by_name)
+        return ProbeResult(False, "HTTP 303 without exactly one Location: /auth/required", code, headers_by_name)
+
+    ok = code in capability.expected_statuses
+    return ProbeResult(ok, f"HTTP {code}", code, headers_by_name)
 
 
-def open_webui_bootstrap(env: dict[str, str]) -> tuple[bool, str]:
-    db_path = ROOT / "data" / "open-webui" / "webui.db"
-    if db_path.exists():
-        try:
-            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
-                count = conn.execute("select count(*) from user").fetchone()[0]
-        except sqlite3.Error as exc:
-            return False, f"cannot inspect Open WebUI users: {exc}"
-        if count > 0:
-            return True, f"{count} Open WebUI user(s) present"
+def env_config_state(capability: Capability, env: dict[str, str]) -> tuple[bool, str]:
+    missing = [key for key in capability.required_env if not env.get(key)]
+    if missing:
+        return False, f"missing required config: {', '.join(missing)}"
+    return True, "required configuration present" if capability.required_env else capability.auth
+
+
+def open_webui_admin_state(env: dict[str, str]) -> tuple[bool, str]:
+    if env.get("WEBUI_AUTH", "true").lower() != "true":
+        return False, "WEBUI_AUTH must remain true"
+    if env.get("WEBUI_ENABLE_SIGNUP", "false").lower() != "false":
+        return False, "WEBUI_ENABLE_SIGNUP must remain false"
+
+    db_path = DATA_DIR / "open-webui" / "webui.db"
+    if not db_path.exists():
+        return False, "Open WebUI database absent; bootstrap not completed"
+    before = snapshot_dir(db_path.parent)
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True) as conn:
+            count = conn.execute("select count(*) from user where role = 'admin'").fetchone()[0]
+    except (sqlite3.Error, OSError) as exc:
+        return False, f"cannot inspect Open WebUI admin state read-only: {exc}"
+    after = snapshot_dir(db_path.parent)
+    if before != after:
+        return False, "Open WebUI admin inspection would mutate persistent state"
+    if count > 0:
+        return True, f"{count} Open WebUI admin user(s) present"
     if env.get("OPEN_WEBUI_ADMIN_EMAIL") and env.get("OPEN_WEBUI_ADMIN_PASSWORD"):
-        return True, "first-admin bootstrap configured; recreate open-webui if DB is empty"
-    return False, "set Open WebUI first-admin env values before recreating open-webui"
+        return False, "first-admin bootstrap configured but admin user is not present"
+    return False, "Open WebUI admin user is not present"
+
+
+def snapshot_dir(path: Path) -> list[tuple[str, int, int, int]]:
+    try:
+        entries = sorted(path.iterdir())
+    except OSError:
+        return []
+    snapshot = []
+    for item in entries:
+        try:
+            stat = item.lstat()
+        except OSError:
+            continue
+        snapshot.append((item.name, stat.st_mode, stat.st_size, stat.st_mtime_ns))
+    return snapshot
 
 
 def auth_state(capability: Capability, env: dict[str, str]) -> tuple[bool, str]:
+    config_ok, config_reason = env_config_state(capability, env)
     if capability.capability == "Open WebUI":
-        if env.get("WEBUI_AUTH", "true").lower() != "true":
-            return False, "WEBUI_AUTH must remain true"
-        if env.get("WEBUI_ENABLE_SIGNUP", "false").lower() != "false":
-            return False, "WEBUI_ENABLE_SIGNUP must remain false"
-        return open_webui_bootstrap(env)
-    if capability.capability == "n8n Workflows":
-        return bool(env.get("N8N_USER") and env.get("N8N_PASS")), "n8n credentials configured" if env.get("N8N_USER") and env.get("N8N_PASS") else "set n8n credentials"
-    if capability.capability == "Langfuse Observability":
-        ok = bool(env.get("LANGFUSE_INIT_USER_EMAIL") and env.get("LANGFUSE_INIT_USER_PASSWORD"))
-        return ok, "Langfuse init credentials configured" if ok else "set Langfuse init credentials"
-    return True, capability.auth
+        webui_ok, webui_reason = open_webui_admin_state(env)
+        if not config_ok:
+            return False, f"{config_reason}; {webui_reason}"
+        return webui_ok, webui_reason
+    return config_ok, config_reason
 
 
-def evaluate(json_mode: bool = False) -> list[dict[str, Any]]:
+def service_ready(value: str) -> bool:
+    return value in READY_HEALTH
+
+
+def evaluate_rows() -> list[dict[str, Any]]:
     env = read_env()
     operator_urls = load_operator_urls(env)
     service_health = compose_ps()
     rows: list[dict[str, Any]] = []
     for cap in CAPABILITIES:
-        health_values = [service_health.get(service, "unknown") for service in cap.services if not service.startswith("ms-qr1-")]
-        container_ok = all(value == "healthy" for value in health_values) if health_values else True
-        local_url = expand(cap.local_url, env)
-        probe_ok, probe_reason = http_probe(local_url, env, cap.probe_auth)
+        health_values = [
+            service_health.get(service, "external" if service == "ms-qr1-ollama-bridge" else "unknown")
+            for service in cap.services
+        ]
+        container_ok = all(service_ready(value) for value in health_values)
+        local_url = expand(os.environ.get(f"MS_QR1_READINESS_URL_{cap.key}", cap.local_url), env)
+        probe = http_probe(local_url, env, cap)
         auth_ok, auth_reason = auth_state(cap, env)
-        deps = {dep: service_health.get(dep, "external" if dep == "ollama-host" else "unknown") for dep in cap.dependencies}
-        deps_ok = all(value in {"healthy", "external"} for value in deps.values())
-        canonical_url = operator_urls.get(cap.capability, cap.canonical_url)
+        deps = {
+            dep: service_health.get(dep, "external" if dep == "ollama-host" else "unknown")
+            for dep in cap.dependencies
+        }
+        deps_ok = all(service_ready(value) for value in deps.values())
+        canonical_url = operator_urls.get(cap.capability, "")
         reachable = "yes" if canonical_url else ("loopback-only" if cap.role == "operator-facing" else "internal-only")
-        ok = container_ok and probe_ok and auth_ok and deps_ok
+        ok = container_ok and probe.ok and auth_ok and deps_ok
         reason_parts = []
         if not container_ok:
             reason_parts.append(f"container health={health_values}")
-        if not probe_ok:
-            reason_parts.append(probe_reason)
+        if not probe.ok:
+            reason_parts.append(probe.reason)
         if not auth_ok:
             reason_parts.append(auth_reason)
         if not deps_ok:
@@ -208,8 +445,8 @@ def evaluate(json_mode: bool = False) -> list[dict[str, Any]]:
             "capability": cap.capability,
             "services": ",".join(cap.services),
             "role": cap.role,
-            "container_health": ",".join(health_values) if health_values else "external/host",
-            "functional_probe": probe_reason,
+            "container_health": ",".join(health_values),
+            "functional_probe": probe.reason,
             "auth_bootstrap_state": auth_reason,
             "operator_reachable": reachable,
             "canonical_operator_url": canonical_url,
@@ -224,12 +461,12 @@ def print_table(rows: list[dict[str, Any]]) -> None:
     columns = [
         ("Capability", "capability", 30),
         ("Role", "role", 17),
-        ("Health", "container_health", 18),
-        ("Probe", "functional_probe", 18),
-        ("Auth/bootstrap", "auth_bootstrap_state", 32),
+        ("Health", "container_health", 24),
+        ("Probe", "functional_probe", 12),
+        ("Auth/bootstrap", "auth_bootstrap_state", 36),
         ("Operator reachable", "operator_reachable", 18),
         ("Result", "result", 6),
-        ("Reason / next action", "reason_next_action", 40),
+        ("Reason / next action", "reason_next_action", 46),
     ]
     print(" | ".join(title.ljust(width) for title, _, width in columns))
     print("-+-".join("-" * width for _, _, width in columns))
@@ -251,24 +488,40 @@ def print_table(rows: list[dict[str, Any]]) -> None:
     print(f"Bootstrap actions: {sum(1 for row in rows if row['result'] != 'PASS')}")
 
 
+def static_self_test() -> int:
+    data = load_registry()
+    if data.get("schema_version") != "ms.qr1.operator_access.v1":
+        print("invalid operator access registry schema", file=sys.stderr)
+        return 1
+    names = {cap.capability for cap in CAPABILITIES}
+    required = {"Open WebUI", "LiteLLM Gateway", "Hermes Operator Surface", "Qdrant Vector Store"}
+    missing = sorted(required - names)
+    if missing:
+        print(f"missing readiness capabilities: {missing}", file=sys.stderr)
+        return 1
+    registry_names = {str(item.get("capability", "")) for item in data.get("operator_surfaces", [])}
+    unknown_registry = sorted(registry_names - names)
+    if unknown_registry:
+        print(f"operator registry references unknown capabilities: {unknown_registry}", file=sys.stderr)
+        return 1
+    hermes = next((item for item in data.get("operator_surfaces", []) if item.get("id") == "hermes"), None)
+    if hermes and hermes.get("canonical_url"):
+        print("Hermes must not advertise a QR1 remote canonical URL", file=sys.stderr)
+        return 1
+    print("QR1 operator readiness self-test passed")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
-    parser.add_argument("--self-test", action="store_true", help="validate static registry/classification")
+    parser.add_argument("--self-test", action="store_true", help="validate static registry/classification only")
     args = parser.parse_args()
 
     if args.self_test:
-        rows = evaluate(json_mode=True)
-        names = {row["capability"] for row in rows}
-        required = {"Open WebUI", "LiteLLM Gateway", "Hermes Operator Surface", "Qdrant Vector Store"}
-        missing = sorted(required - names)
-        if missing:
-            print(f"missing readiness capabilities: {missing}", file=sys.stderr)
-            return 1
-        print("QR1 operator readiness self-test passed")
-        return 0
+        return static_self_test()
 
-    rows = evaluate(json_mode=args.json)
+    rows = evaluate_rows()
     if args.json:
         print(json.dumps({"capabilities": rows}, indent=2, sort_keys=True))
     else:

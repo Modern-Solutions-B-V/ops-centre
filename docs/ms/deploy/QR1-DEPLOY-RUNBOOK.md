@@ -573,13 +573,47 @@ Required `.env` intent:
 
 - `WEBUI_AUTH` remains `true`.
 - `WEBUI_ENABLE_SIGNUP` remains `false`.
+- `MS_QR1_TAILSCALE_HOSTNAME` is set to the approved private Tailscale host
+  name, for example the EVO-X3 value recorded during qualification.
 - `OPEN_WEBUI_ADMIN_EMAIL` is set to the operator admin email.
 - `OPEN_WEBUI_ADMIN_PASSWORD` is set to a strong secret.
 - `OPEN_WEBUI_ADMIN_NAME` may remain the QR1 default or be set to a display
   name.
 
 Open WebUI creates the configured admin only when no users exist in
-`data/open-webui/webui.db`; existing users are not overwritten on restart.
+`data/open-webui/webui.db`; existing users are not overwritten on restart. The
+readiness gate verifies that an actual `role='admin'` user exists. Having
+bootstrap values configured is not sufficient.
+
+If EVO-X3 already completed generic Full Stack onboarding before this fix,
+reconcile the QR1 Langfuse compose-file state before rendering Compose. This
+procedure only touches repository files, not `data/langfuse`:
+
+```bash
+cd ~/ms-ops/ops-centre
+git fetch origin
+git pull --ff-only origin ms/main
+cd ods
+
+git status --short -- extensions/services/langfuse
+if git ls-files --error-unmatch extensions/services/langfuse/compose.yaml >/dev/null 2>&1; then
+  echo "ERROR: active Langfuse compose file is tracked; stop and inspect manually" >&2
+  exit 1
+fi
+if [ -e extensions/services/langfuse/compose.yaml ]; then
+  rm -f extensions/services/langfuse/compose.yaml
+fi
+git restore --source=origin/ms/main -- extensions/services/langfuse/compose.yaml.disabled
+
+test ! -e extensions/services/langfuse/compose.yaml
+test -f extensions/services/langfuse/compose.yaml.disabled
+scripts/ms-qr1-compose-flags.sh >/tmp/qr1-compose-flags.txt
+docker compose $(scripts/ms-qr1-compose-flags.sh) config >/tmp/qr1-compose.rendered.yml
+```
+
+This removes only the untracked onboarding-created active compose file when it
+is proven untracked, restores the tracked QR1 authoritative disabled file from
+the merged baseline, and fails if a mixed or unexpected state is present.
 
 Run one consolidated readiness sweep:
 
@@ -595,9 +629,11 @@ canonical operator URL where a route is approved.
 
 Approved QR1 operator launch URLs:
 
-- Dashboard: `https://evox3.tailfc79e6.ts.net`
-- Open WebUI: `https://evox3.tailfc79e6.ts.net:8443` while the temporary
+- Dashboard: `https://${MS_QR1_TAILSCALE_HOSTNAME}`
+- Open WebUI: `https://${MS_QR1_TAILSCALE_HOSTNAME}:8443` while the temporary
   private operator test route remains configured.
+- Hermes: no QR1 remote operator route is approved; it remains loopback/internal
+  behind the existing dashboard/Hermes proxy contract until QR2 route review.
 
 Do not add Tailscale Serve routes for internal services merely because they
 publish loopback ports. Internal services such as LiteLLM, Model Router,
@@ -611,9 +647,22 @@ Evidence: readiness table, `/tmp/qr1-operator-readiness.json`, and the
 dashboard Quick Links showing QR1 public URLs only where configured through
 the approved public URL env mechanism.
 
-Rollback: remove the Open WebUI first-admin values from `.env` if they were
-added only for bootstrap, then recreate `open-webui`. Do not enable signup or
-open public signup during rollback.
+Post-merge EVO-X3 completion requires both gates:
+
+```bash
+scripts/ms-qr1-operator-readiness.sh
+sudo EXPECTED_MODEL=qwen3.8:27b ENV_FILE="$PWD/.env" scripts/ms-qr1-acceptance.sh
+```
+
+No full requalification of already-passed QR1 infrastructure is required for
+this operator-readiness change.
+
+Rollback: removing the Open WebUI first-admin values from `.env` prevents
+future env-driven bootstrap attempts, but it does not delete or undo an admin
+already persisted in `data/open-webui/webui.db`. Normal rollback preserves that
+persistent user state. Destructive user/database rollback requires a separate
+reviewed quiescent restore/removal procedure. Do not enable signup, open public
+signup, or casually delete the Open WebUI database during rollback.
 
 ## 16. Host-Agent nmcli Boundary
 

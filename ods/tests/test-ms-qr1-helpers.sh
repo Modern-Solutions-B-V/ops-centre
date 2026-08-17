@@ -1486,10 +1486,14 @@ assert_contains 'WEBUI_ADMIN_EMAIL: "${OPEN_WEBUI_ADMIN_EMAIL:-}"' docker-compos
 assert_contains 'WEBUI_ADMIN_PASSWORD: "${OPEN_WEBUI_ADMIN_PASSWORD:-}"' docker-compose.ms-qr1.yml
 assert_contains 'OPEN_WEBUI_ADMIN_EMAIL=' profiles/ms-qr1.env.example
 assert_contains 'OPEN_WEBUI_ADMIN_PASSWORD=' profiles/ms-qr1.env.example
+assert_contains 'MS_QR1_TAILSCALE_HOSTNAME=' profiles/ms-qr1.env.example
+assert_contains '"MS_QR1_TAILSCALE_HOSTNAME"' .env.schema.json
 assert_contains 'template_application_enabled' extensions/services/dashboard-api/routers/setup.py
 assert_contains 'qr1_registration_only' extensions/services/dashboard-api/routers/templates.py
 assert_contains 'operator-access.json' scripts/ms-qr1-operator-readiness.py
 assert_contains 'Open WebUI' config/ms-qr1/operator-access.json
+assert_contains '"canonical_url": ""' config/ms-qr1/operator-access.json
+assert_not_contains 'evox3.tailfc79e6.ts.net' config/ms-qr1/operator-access.json
 assert_contains 'SDXL_REVISION=c6c10e8716de60c7ef4eed6b89a06f67e772b374' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'SDXL_SHA256=e0d996ee0013e79d9d3561f50fcafb9a17e3ff07b780358e3b66d67932c4d490' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'sha256sum -c -' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
