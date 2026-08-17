@@ -321,6 +321,10 @@ for raw_line in lines:
     line = raw_line.strip()
     if not line:
         continue
+    if line.startswith("|--> "):
+        line = "--> " + line[5:]
+    elif line.startswith("|-- "):
+        line = line[4:]
     target_match = target_re.match(line)
     if target_match:
         if not pending:
