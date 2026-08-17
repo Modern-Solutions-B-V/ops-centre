@@ -31,6 +31,12 @@ MS-controlled privileged mutation boundary. A supported alternate caller, such
 as host-agent invoking a setup hook directly, must not be able to bypass the
 gate by skipping the normal runbook sequence.
 
+The quiescence invariant is MS security policy. Orchestration may be
+deployment-specific, but the enforcement primitive used by shared ODS lifecycle
+hooks must be deployment-neutral: it accepts target persistent path(s), derives
+writers from the active Compose model, and must not depend on QR1-only compose
+flags, profiles or disabled template filenames.
+
 For QR1, the quiescence gate is derived from rendered Compose writable bind
 mounts that intersect the persistent data trees being repaired, including
 `data/n8n`, `data/persona` and `data/langfuse`.

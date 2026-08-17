@@ -240,8 +240,9 @@ a writable bind mount intersecting `data/n8n`, `data/persona`, or
 writers. Compose stop succeeds, `verify-quiescent` confirms no corresponding
 writer container is running, and only then do the Langfuse ownership hook and
 QR1 `prestart-init` run. The Langfuse hook also independently enforces the
-same quiescence boundary before ownership mutation, so host-agent or direct
-hook invocation cannot bypass the ADR. Langfuse PostgreSQL and ClickHouse bind-mount
+same quiescence boundary through the deployment-neutral
+`scripts/ods-verify-quiescent-data-writers.sh` verifier before ownership
+mutation, so host-agent or direct hook invocation cannot bypass the ADR. Langfuse PostgreSQL and ClickHouse bind-mount
 directories are owned for their container users; SDXL Lightning checkpoint
 exists only after SHA256 verification succeeds.
 `data/persona/SOUL.md` is a regular UTF-8 file generated through

@@ -76,6 +76,28 @@ print(Path(sys.argv[1]).read_text().replace("__N8N_USER__", sys.argv[2]), end=""
 PY
   exit 0
 fi
+if [[ "${1:-}" == "image" && "${2:-}" == "inspect" ]]; then
+  exit 0
+fi
+if [[ "${1:-}" == "container" && "${2:-}" == "ls" ]]; then
+  if [[ "${DOCKER_CONTAINER_LS_FAIL:-0}" == "1" ]]; then
+    echo "fixture docker container ls failure" >&2
+    exit 56
+  fi
+  if [[ -n "${DOCKER_CONTAINER_STATES:-}" ]]; then
+    printf '%s\n' $DOCKER_CONTAINER_STATES
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "run" ]]; then
+  printf '%s\n' "$*" >> "$FIXTURE_DIR/docker-run.log"
+  case "$*" in
+    *" stat -c "*)
+      printf '%s\n' "${ROOTLESS_STAT_METADATA:-1000:1000:755}"
+      ;;
+  esac
+  exit 0
+fi
 if [[ "${1:-}" == "compose" && " $* " == *" up "* ]]; then
   printf '%s\n' "$*" >> "$FIXTURE_DIR/docker-compose-up.log"
   printf 'compose-up %s\n' "$*" >> "$FIXTURE_DIR/docker-sequence.log"
@@ -586,9 +608,32 @@ assert_contains 'ods-dashboard-api' "$tmpdir/prestart-active-dashboard.err"
   echo "prestart-init mutated data while dashboard-api writer was running" >&2
   exit 1
 }
+override_scope_data="$tmpdir/override-scope-data"
+if DOCKER_PS_NAMES="ods-dashboard-api" MS_QR1_QUIESCENCE_TARGETS="/tmp/not-a-qr1-target" FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$override_scope_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh prestart-init > "$tmpdir/prestart-override-scope.out" 2> "$tmpdir/prestart-override-scope.err"; then
+  echo "prestart-init should ignore target-scope overrides and fail when a real writer is running" >&2
+  exit 1
+fi
+assert_contains 'requires quiescent container-writable state' "$tmpdir/prestart-override-scope.err"
+assert_contains 'ods-dashboard-api' "$tmpdir/prestart-override-scope.err"
+[[ ! -e "$override_scope_data" ]] || {
+  echo "prestart-init mutated data after target-scope override weakened the gate" >&2
+  exit 1
+}
 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$tmpdir/writer-list-data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh writer-services > "$tmpdir/writer-services.out"
 assert_contains 'n8n' "$tmpdir/writer-services.out"
 assert_contains 'dashboard-api' "$tmpdir/writer-services.out"
+ODS_QUIESCENCE_COMPOSE_FLAGS="-f docker-compose.base.yml -f extensions/services/langfuse/compose.yaml" "${env_prefix[@]}" scripts/ods-verify-quiescent-data-writers.sh writer-services --install-dir "$PWD" --target data/langfuse > "$tmpdir/shared-writers-generic-langfuse.out"
+assert_contains 'dashboard-api' "$tmpdir/shared-writers-generic-langfuse.out"
+if grep -F 'compose.yaml.disabled' "$tmpdir/shared-writers-generic-langfuse.out" >/dev/null; then
+  echo "shared quiescence verifier should not depend on QR1 disabled compose filename" >&2
+  exit 1
+fi
+if DOCKER_PS_NAMES="ods-dashboard-api" ODS_QUIESCENCE_COMPOSE_FLAGS="-f docker-compose.base.yml -f extensions/services/langfuse/compose.yaml" "${env_prefix[@]}" scripts/ods-verify-quiescent-data-writers.sh verify --install-dir "$PWD" --target data/langfuse > "$tmpdir/shared-verify-active.out" 2> "$tmpdir/shared-verify-active.err"; then
+  echo "shared quiescence verifier should fail when a broad data writer is active" >&2
+  exit 1
+fi
+assert_contains 'ods-dashboard-api' "$tmpdir/shared-verify-active.err"
+ODS_QUIESCENCE_COMPOSE_FLAGS="-f docker-compose.base.yml -f extensions/services/langfuse/compose.yaml" "${env_prefix[@]}" scripts/ods-verify-quiescent-data-writers.sh verify --install-dir "$PWD" --target data/langfuse > "$tmpdir/shared-verify-quiescent.out"
 if DOCKER_COMPOSE_STOP_FAIL=1 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$tmpdir/stop-gate-data" "${env_prefix[@]}" bash -c '
   set -euo pipefail
   writers="$(scripts/ms-qr1-prestart-provision.sh writer-services | tr "\n" " ")"
@@ -607,6 +652,66 @@ if DOCKER_PS_NAMES="ods-dashboard-api" FIXTURE_N8N_USER="$fixture_uid:$fixture_g
   exit 1
 fi
 assert_contains 'ods-dashboard-api' "$tmpdir/verify-gate.err"
+rm -f "$tmpdir/docker-run.log"
+rootless_install="$tmpdir/rootless-install"
+mkdir -p "$rootless_install/scripts" "$rootless_install/lib" "$rootless_install/data/n8n" "$rootless_install/data/langfuse/postgres" "$rootless_install/data/langfuse/clickhouse"
+cp scripts/ods-verify-quiescent-data-writers.sh "$rootless_install/scripts/"
+cp lib/rootless-ownership.sh "$rootless_install/lib/"
+chmod +x "$rootless_install/scripts/ods-verify-quiescent-data-writers.sh" "$rootless_install/lib/rootless-ownership.sh"
+if DOCKER_PS_NAMES="ods-dashboard-api" DOCKER_CONTAINER_STATES="ods-n8n:exited" ODS_ASSUME_ROOTLESS=1 ODS_ROOTLESS_COMPOSE_FLAGS="-f docker-compose.base.yml -f extensions/services/n8n/compose.yaml" "${env_prefix[@]}" bash "$rootless_install/lib/rootless-ownership.sh" "$rootless_install" n8n > "$tmpdir/rootless-n8n-active.out" 2> "$tmpdir/rootless-n8n-active.err"; then
+  echo "rootless n8n repair should fail when dashboard-api can still write data/n8n" >&2
+  exit 1
+fi
+assert_contains 'quiescent container-writable state' "$tmpdir/rootless-n8n-active.err"
+[[ ! -e "$tmpdir/docker-run.log" ]] || {
+  echo "rootless n8n repair mutated after failed quiescence" >&2
+  cat "$tmpdir/docker-run.log" >&2
+  exit 1
+}
+if DOCKER_PS_NAMES="ods-dashboard-api" DOCKER_CONTAINER_STATES="ods-langfuse-postgres:exited ods-langfuse-clickhouse:exited" ODS_ASSUME_ROOTLESS=1 ODS_ROOTLESS_COMPOSE_FLAGS="-f docker-compose.base.yml -f extensions/services/langfuse/compose.yaml" "${env_prefix[@]}" bash "$rootless_install/lib/rootless-ownership.sh" "$rootless_install" langfuse > "$tmpdir/rootless-langfuse-active.out" 2> "$tmpdir/rootless-langfuse-active.err"; then
+  echo "rootless Langfuse repair should fail when dashboard-api can still write data/langfuse" >&2
+  exit 1
+fi
+assert_contains 'quiescent container-writable state' "$tmpdir/rootless-langfuse-active.err"
+[[ ! -e "$tmpdir/docker-run.log" ]] || {
+  echo "rootless Langfuse repair mutated after failed quiescence" >&2
+  cat "$tmpdir/docker-run.log" >&2
+  exit 1
+}
+if DOCKER_PS_NAMES="ods-dashboard-api" ODS_ASSUME_ROOTLESS=1 ODS_ROOTLESS_COMPOSE_FLAGS="-f docker-compose.base.yml -f extensions/services/n8n/compose.yaml" "${env_prefix[@]}" python3 - "$rootless_install" <<'PY' > "$tmpdir/host-agent-rootless-active.out" 2> "$tmpdir/host-agent-rootless-active.err"
+import importlib.util
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("ods_host_agent", "bin/ods-host-agent.py")
+mod = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(mod)
+mod.INSTALL_DIR = Path(sys.argv[1])
+mod.platform.system = lambda: "Linux"
+try:
+    mod._repair_rootless_data_ownership("n8n")
+except RuntimeError as exc:
+    if "quiescent" not in str(exc):
+        raise SystemExit(f"host-agent did not surface quiescence failure: {exc}")
+else:
+    raise SystemExit("host-agent rootless repair unexpectedly succeeded with active writer")
+PY
+then
+  :
+else
+  echo "host-agent rootless active-writer fixture failed unexpectedly" >&2
+  cat "$tmpdir/host-agent-rootless-active.out" >&2
+  cat "$tmpdir/host-agent-rootless-active.err" >&2
+  exit 1
+fi
+[[ ! -e "$tmpdir/docker-run.log" ]] || {
+  echo "host-agent rootless path mutated after failed quiescence" >&2
+  cat "$tmpdir/docker-run.log" >&2
+  exit 1
+}
+ROOTLESS_STAT_METADATA="1000:1000:755" DOCKER_CONTAINER_STATES="ods-n8n:exited" ODS_ASSUME_ROOTLESS=1 ODS_ROOTLESS_COMPOSE_FLAGS="-f docker-compose.base.yml -f extensions/services/n8n/compose.yaml" "${env_prefix[@]}" bash "$rootless_install/lib/rootless-ownership.sh" "$rootless_install" n8n > "$tmpdir/rootless-n8n-quiescent.out" 2> "$tmpdir/rootless-n8n-quiescent.err"
+assert_contains ' chown -R 1000:1000 /data' "$tmpdir/docker-run.log"
 rm -f "$tmpdir/chown.log"
 if DOCKER_PS_NAMES="ods-dashboard-api" ODS_ASSUME_ROOTLESS=0 "${env_prefix[@]}" bash extensions/services/langfuse/hooks/post_install.sh "$PWD" amd > "$tmpdir/langfuse-hook-active.out" 2> "$tmpdir/langfuse-hook-active.err"; then
   echo "Langfuse post_install hook should fail when a data/langfuse writer is running" >&2
@@ -1039,11 +1144,14 @@ if CURL_MODE=transport "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-accepta
 fi
 
 for f in \
+  scripts/ods-verify-quiescent-data-writers.sh \
   scripts/ms-qr1-compose-flags.sh \
   scripts/ms-qr1-ufw-docker-rules.sh \
   scripts/ms-qr1-prestart-provision.sh \
   scripts/ms-qr1-ollama-bridge.sh \
-  scripts/ms-qr1-acceptance.sh; do
+  scripts/ms-qr1-acceptance.sh \
+  extensions/services/langfuse/hooks/post_install.sh \
+  lib/rootless-ownership.sh; do
   bash -n "$f"
 done
 PYTHONPYCACHEPREFIX="$tmpdir/pycache" python3 -m py_compile scripts/ms-qr1-ollama-http-proxy.py
@@ -1086,15 +1194,20 @@ assert_contains 'scripts/ms-qr1-prestart-provision.sh writer-services' ../docs/m
 assert_contains 'scripts/ms-qr1-prestart-provision.sh verify-quiescent' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'scripts/ms-qr1-prestart-provision.sh poststart-refresh' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
-assert_contains 'quiescent container-writable state' scripts/ms-qr1-prestart-provision.sh
-assert_contains 'MS_QR1_QUIESCENCE_TARGETS="data/langfuse"' extensions/services/langfuse/hooks/post_install.sh
+assert_contains 'ods-verify-quiescent-data-writers.sh verify' scripts/ms-qr1-prestart-provision.sh
+assert_contains 'ODS_QUIESCENCE_DATA_DIR="$DATA_DIR"' scripts/ms-qr1-prestart-provision.sh
+assert_contains 'ods-verify-quiescent-data-writers.sh' extensions/services/langfuse/hooks/post_install.sh
+assert_not_contains 'ms-qr1-prestart-provision.sh' extensions/services/langfuse/hooks/post_install.sh
 assert_contains 'Langfuse ownership repair requires quiescent data/langfuse writer containers' extensions/services/langfuse/hooks/post_install.sh
+assert_contains 'ods-verify-quiescent-data-writers.sh' lib/rootless-ownership.sh
 assert_contains 'mktemp "$PERSONA_DIR/.SOUL.md.tmp.XXXXXX"' scripts/ms-qr1-prestart-provision.sh
 assert_not_contains '127.0.0.1:9119/api/status' scripts/ms-qr1-prestart-provision.sh
 assert_not_contains '127.0.0.1:9119/api/status' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_not_contains 'stop n8n hermes hermes-proxy dashboard-api || true' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_not_contains 'sudo rm -rf data/langfuse/postgres data/langfuse/clickhouse' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_not_contains 'remove that directory and rerun' ../docs/ms/ODS-MS-CHANGELOG.md
+assert_not_contains 'chown -R 1000:1000 ods/data/n8n' extensions/services/n8n/README.md
+assert_not_contains 'remove `data/langfuse/postgres/`' extensions/services/langfuse/README.md
 assert_contains 'Runtime acceptance checks' ../AGENTS.md
 assert_contains 'up -d --no-deps --force-recreate hermes' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --force-recreate' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md

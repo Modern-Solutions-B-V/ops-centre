@@ -115,7 +115,12 @@ docker compose logs n8n
 
 **File permission errors on startup:**
 - n8n runs as `UID:GID` set in `.env` (default `1000:1000`)
-- Ensure `data/n8n/` is owned by that user: `chown -R 1000:1000 ods/data/n8n`
+- Do not repair `data/n8n/` while containers that can write it are running.
+  Use the supported repair lifecycle: derive the writer services for
+  `data/n8n`, stop them, verify quiescence with
+  `scripts/ods-verify-quiescent-data-writers.sh verify --target data/n8n`,
+  run the ownership repair helper, then restart the affected services.
+  Direct `chown -R` is not a supported recovery path.
 
 ## License
 

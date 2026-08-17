@@ -118,6 +118,24 @@ _ods_rootless_ensure_helper_image() {
     fi
 }
 
+_ods_rootless_verify_quiescent_writers() {
+    local install_dir="$1" relative="$2" verifier flags
+    verifier="$install_dir/scripts/ods-verify-quiescent-data-writers.sh"
+    [[ -x "$verifier" ]] || {
+        echo "[error] Missing quiescence verifier: $verifier" >&2
+        return 1
+    }
+    flags=$(_ods_rootless_compose_flags)
+    # ADR: docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md.
+    # Rootless repair performs recursive privileged mutation through a helper
+    # container, so the mutation boundary must reject every active writer of
+    # the target path, not just the service-specific container.
+    if ! ODS_QUIESCENCE_COMPOSE_FLAGS="$flags" "$verifier" verify --install-dir "$install_dir" --target "$relative"; then
+        echo "[error] Refusing rootless ownership repair until writers of $relative are stopped." >&2
+        return 1
+    fi
+}
+
 _ods_rootless_ensure_directory() {
     local install_dir="$1" relative="$2" data_root subpath
 
@@ -198,6 +216,7 @@ _ods_rootless_fix_directory() {
         echo "[error] Invalid rootless mode '$mode' for $relative." >&2
         return 1
     }
+    _ods_rootless_verify_quiescent_writers "$install_dir" "$relative" || return 1
     _ods_rootless_ensure_directory "$install_dir" "$relative" || return 1
     target=$(_ods_rootless_resolve_target "$install_dir" "$relative") || return 1
     metadata=$(_ods_rootless_stat_metadata "$target") || {
