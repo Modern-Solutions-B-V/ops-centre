@@ -7,6 +7,9 @@ Usage:
   scripts/ms-qr1-prestart-provision.sh prestart-init
   scripts/ms-qr1-prestart-provision.sh check
   scripts/ms-qr1-prestart-provision.sh n8n-user
+  scripts/ms-qr1-prestart-provision.sh writer-services
+  scripts/ms-qr1-prestart-provision.sh writer-containers
+  scripts/ms-qr1-prestart-provision.sh verify-quiescent
   scripts/ms-qr1-prestart-provision.sh poststart-refresh
 
 Idempotently prepares QR1 bind-mount prerequisites before any Docker Compose
@@ -20,7 +23,7 @@ USAGE
 
 ACTION="${1:-prestart-init}"
 case "$ACTION" in
-  prestart-init|provision|check|n8n-user|poststart-refresh) ;;
+  prestart-init|provision|check|n8n-user|writer-services|writer-containers|verify-quiescent|poststart-refresh) ;;
   -h|--help|help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -40,9 +43,12 @@ require python3
 DEPLOY_UID="${MS_QR1_DEPLOY_UID:-${SUDO_UID:-$(id -u)}}"
 DEPLOY_GID="${MS_QR1_DEPLOY_GID:-${SUDO_GID:-$(id -g)}}"
 DATA_DIR="${MS_QR1_DATA_DIR:-data}"
+LANGFUSE_DIR="$DATA_DIR/langfuse"
 PERSONA_DIR="$DATA_DIR/persona"
 SOUL_PATH="$PERSONA_DIR/SOUL.md"
 N8N_DIR="$DATA_DIR/n8n"
+HERMES_HEALTH_TIMEOUT="${MS_QR1_HERMES_HEALTH_TIMEOUT:-120}"
+HERMES_HEALTH_INTERVAL="${MS_QR1_HERMES_HEALTH_INTERVAL:-2}"
 
 is_root() {
   [[ "$(id -u)" -eq 0 ]]
@@ -60,8 +66,8 @@ compose_json() {
     docker compose $(scripts/ms-qr1-compose-flags.sh) config --format json
 }
 
-writer_containers_for_data_targets() {
-  local rendered data_abs
+writers_for_data_targets() {
+  local output_kind="$1" rendered data_abs
   rendered="$(compose_json)"
   data_abs="$(python3 - "$DATA_DIR" <<'PY'
 from pathlib import Path
@@ -70,15 +76,20 @@ import sys
 print(Path(sys.argv[1]).resolve())
 PY
 )"
-  COMPOSE_JSON="$rendered" DATA_ABS="$data_abs" python3 - <<'PY'
+  COMPOSE_JSON="$rendered" DATA_ABS="$data_abs" OUTPUT_KIND="$output_kind" python3 - <<'PY'
 import json
 import os
 from pathlib import Path
 
 data = json.loads(os.environ["COMPOSE_JSON"])
 data_abs = Path(os.environ["DATA_ABS"]).resolve()
-targets = [(data_abs / "n8n").resolve(), (data_abs / "persona").resolve()]
-containers = []
+output_kind = os.environ["OUTPUT_KIND"]
+targets = [
+    (data_abs / "n8n").resolve(),
+    (data_abs / "persona").resolve(),
+    (data_abs / "langfuse").resolve(),
+]
+writers = []
 
 def contains_or_is_contained(left: Path, right: Path) -> bool:
     return left == right or left in right.parents or right in left.parents
@@ -111,12 +122,23 @@ for service_name, service in sorted(data.get("services", {}).items()):
         except FileNotFoundError:
             source_abs = source_path.absolute()
         if any(contains_or_is_contained(source_abs, target) for target in targets):
-            containers.append(str(service.get("container_name") or f"ods-{service_name}"))
+            if output_kind == "services":
+                writers.append(service_name)
+            else:
+                writers.append(str(service.get("container_name") or f"ods-{service_name}"))
             break
 
-for name in sorted(set(containers)):
+for name in sorted(set(writers)):
     print(name)
 PY
+}
+
+writer_services_for_data_targets() {
+  writers_for_data_targets services
+}
+
+writer_containers_for_data_targets() {
+  writers_for_data_targets containers
 }
 
 require_quiescent_data_writers() {
@@ -144,6 +166,31 @@ PY
     echo "Run: docker stop $(printf '%s\n' "$active" | tr '\n' ' ')" >&2
     return 1
   fi
+}
+
+wait_for_hermes_healthy() {
+  local deadline status health
+  deadline=$((SECONDS + HERMES_HEALTH_TIMEOUT))
+  while (( SECONDS <= deadline )); do
+    if ! status="$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ods-hermes)"; then
+      echo "ERROR: cannot inspect ods-hermes health" >&2
+      return 1
+    fi
+    health="${status#* }"
+    status="${status%% *}"
+    case "$status:$health" in
+      running:healthy)
+        return 0
+        ;;
+      exited:*|dead:*|*:unhealthy)
+        echo "ERROR: ods-hermes reached non-healthy state: status=$status health=$health" >&2
+        return 1
+        ;;
+    esac
+    sleep "$HERMES_HEALTH_INTERVAL"
+  done
+  echo "ERROR: timed out waiting for ods-hermes health=healthy" >&2
+  return 1
 }
 
 resolve_n8n_user() {
@@ -213,9 +260,17 @@ ensure_persona() {
   fi
   reject_symlink "$SOUL_PATH"
   if [[ -d "$SOUL_PATH" ]]; then
-    echo "ERROR: $SOUL_PATH is a directory, probably created by a previous failed Docker bind mount." >&2
-    echo "Remove the directory, restore $PERSONA_DIR ownership, and rerun this helper before Compose." >&2
-    return 1
+    if [[ "$ACTION" != "prestart-init" ]]; then
+      echo "ERROR: $SOUL_PATH is a directory, probably created by a previous failed Docker bind mount." >&2
+      echo "Run prestart-init after verifying writer containers are stopped." >&2
+      return 1
+    fi
+    # ADR: accidental Docker-created SOUL.md directories are repaired only
+    # after prestart-init has verified quiescent writers.
+    rmdir "$SOUL_PATH" || {
+      echo "ERROR: $SOUL_PATH is a non-empty directory; refusing automatic repair." >&2
+      return 1
+    }
   fi
   reject_symlink "$SOUL_PATH"
   local soul_tmp
@@ -465,6 +520,21 @@ if [[ "$ACTION" == "n8n-user" ]]; then
   exit 0
 fi
 
+if [[ "$ACTION" == "writer-services" ]]; then
+  writer_services_for_data_targets
+  exit 0
+fi
+
+if [[ "$ACTION" == "writer-containers" ]]; then
+  writer_containers_for_data_targets
+  exit 0
+fi
+
+if [[ "$ACTION" == "verify-quiescent" ]]; then
+  require_quiescent_data_writers
+  exit 0
+fi
+
 if [[ "$ACTION" == "check" ]]; then
   check_prestart
   exit 0
@@ -480,16 +550,20 @@ poststart_refresh() {
   # so Docker establishes a fresh file bind mount for the updated persona.
   ensure_persona
   require docker
-  require curl
   local containers
   containers="$(docker ps --format '{{.Names}}')"
   if ! grep -Fx 'ods-hermes' <<<"$containers" >/dev/null; then
     echo "ERROR: ods-hermes is not running; cannot refresh Hermes persona" >&2
     return 1
   fi
+  # Recreate before copying so /opt/hermes/docker/SOUL.md is bound to the new
+  # host inode; then sync the repository-supported persistent persona path.
   docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps --force-recreate hermes
+  wait_for_hermes_healthy
+  docker exec ods-hermes cp /opt/hermes/docker/SOUL.md /opt/data/SOUL.md
+  docker compose $(scripts/ms-qr1-compose-flags.sh) restart hermes
+  wait_for_hermes_healthy
   docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps --force-recreate hermes-proxy
-  curl -fsS --max-time 30 http://127.0.0.1:9119/api/status >/dev/null
 }
 
 if [[ "$ACTION" == "poststart-refresh" ]]; then

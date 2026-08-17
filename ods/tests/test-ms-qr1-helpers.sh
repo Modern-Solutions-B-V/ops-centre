@@ -78,6 +78,20 @@ PY
 fi
 if [[ "${1:-}" == "compose" && " $* " == *" up "* ]]; then
   printf '%s\n' "$*" >> "$FIXTURE_DIR/docker-compose-up.log"
+  printf 'compose-up %s\n' "$*" >> "$FIXTURE_DIR/docker-sequence.log"
+  exit 0
+fi
+if [[ "${1:-}" == "compose" && " $* " == *" stop "* ]]; then
+  printf '%s\n' "$*" >> "$FIXTURE_DIR/docker-compose-stop.log"
+  if [[ "${DOCKER_COMPOSE_STOP_FAIL:-0}" == "1" ]]; then
+    echo "fixture docker compose stop failure" >&2
+    exit 55
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "compose" && " $* " == *" restart "* ]]; then
+  printf '%s\n' "$*" >> "$FIXTURE_DIR/docker-compose-restart.log"
+  printf 'compose-restart %s\n' "$*" >> "$FIXTURE_DIR/docker-sequence.log"
   exit 0
 fi
 if [[ "${1:-}" == "network" && "${2:-}" == "inspect" ]]; then
@@ -124,6 +138,18 @@ if [[ "${1:-}" == "exec" && "${2:-}" == "ods-hermes" ]]; then
     exit 52
   fi
   printf '%s\n' "$*" >> "$FIXTURE_DIR/docker-exec.log"
+  printf 'exec %s\n' "$*" >> "$FIXTURE_DIR/docker-sequence.log"
+  exit 0
+fi
+if [[ "${1:-}" == "inspect" && "${2:-}" == "--format" && "${4:-}" == "ods-hermes" ]]; then
+  case "${DOCKER_INSPECT_HERMES:-healthy}" in
+    healthy) echo "running healthy" ;;
+    unhealthy) echo "running unhealthy" ;;
+    exited) echo "exited none" ;;
+    starting) echo "running starting" ;;
+    fail) echo "fixture docker inspect failure" >&2; exit 54 ;;
+    *) echo "${DOCKER_INSPECT_HERMES}" ;;
+  esac
   exit 0
 fi
 echo "unexpected docker command: $*" >&2
@@ -550,6 +576,27 @@ assert_contains 'ods-dashboard-api' "$tmpdir/prestart-active-dashboard.err"
   echo "prestart-init mutated data while dashboard-api writer was running" >&2
   exit 1
 }
+FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$tmpdir/writer-list-data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh writer-services > "$tmpdir/writer-services.out"
+assert_contains 'n8n' "$tmpdir/writer-services.out"
+assert_contains 'dashboard-api' "$tmpdir/writer-services.out"
+if DOCKER_COMPOSE_STOP_FAIL=1 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$tmpdir/stop-gate-data" "${env_prefix[@]}" bash -c '
+  set -euo pipefail
+  writers="$(scripts/ms-qr1-prestart-provision.sh writer-services | tr "\n" " ")"
+  docker compose $(scripts/ms-qr1-compose-flags.sh) stop $writers
+  touch "$FIXTURE_DIR/privileged-hook-reached"
+' > "$tmpdir/stop-gate-fail.out" 2> "$tmpdir/stop-gate-fail.err"; then
+  echo "runbook stop gate should fail when Compose stop fails" >&2
+  exit 1
+fi
+[[ ! -e "$tmpdir/privileged-hook-reached" ]] || {
+  echo "privileged hook marker was reached after failed Compose stop" >&2
+  exit 1
+}
+if DOCKER_PS_NAMES="ods-dashboard-api" FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$tmpdir/verify-gate-data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh verify-quiescent > "$tmpdir/verify-gate.out" 2> "$tmpdir/verify-gate.err"; then
+  echo "verify-quiescent should fail when a writer remains running" >&2
+  exit 1
+fi
+assert_contains 'ods-dashboard-api' "$tmpdir/verify-gate.err"
 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/prestart-provision.out"
 assert_contains 'QR1 pre-start provisioning complete' "$tmpdir/prestart-provision.out"
 [[ -f "$fixture_data/persona/SOUL.md" ]] || {
@@ -831,6 +878,19 @@ assert_contains 'skipping data/n8n provisioning' "$tmpdir/prestart-no-n8n.out"
 DOCKER_PS_HAS_HERMES=1 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-refresh.out"
 assert_contains 'up -d --no-deps --force-recreate hermes' "$tmpdir/docker-compose-up.log"
 assert_contains 'up -d --no-deps --force-recreate hermes-proxy' "$tmpdir/docker-compose-up.log"
+assert_contains 'exec ods-hermes cp /opt/hermes/docker/SOUL.md /opt/data/SOUL.md' "$tmpdir/docker-exec.log"
+assert_contains 'restart hermes' "$tmpdir/docker-compose-restart.log"
+python3 - "$tmpdir/docker-sequence.log" <<'PY'
+from pathlib import Path
+import sys
+
+text = Path(sys.argv[1]).read_text()
+recreate = text.index("force-recreate hermes")
+sync = text.index("cp /opt/hermes/docker/SOUL.md /opt/data/SOUL.md")
+restart = text.index("restart hermes")
+if not recreate < sync < restart:
+    raise SystemExit("Hermes refresh order must be recreate -> sync persistent persona -> restart")
+PY
 if DOCKER_PS_FAIL=1 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-docker-fail.out" 2> "$tmpdir/poststart-docker-fail.err"; then
   echo "poststart-refresh should fail when docker ps fails" >&2
   exit 1
@@ -846,17 +906,36 @@ if DOCKER_PS_STOPPED_HERMES=1 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR
   exit 1
 fi
 assert_contains 'ods-hermes is not running' "$tmpdir/poststart-hermes-stopped.err"
-if DOCKER_PS_HAS_HERMES=1 CURL_MODE=transport FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-health-fail.out" 2> "$tmpdir/poststart-health-fail.err"; then
-  echo "poststart-refresh should fail when Hermes health check fails" >&2
+if DOCKER_PS_HAS_HERMES=1 DOCKER_INSPECT_HERMES=unhealthy FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-health-unhealthy.out" 2> "$tmpdir/poststart-health-unhealthy.err"; then
+  echo "poststart-refresh should fail when Hermes is unhealthy" >&2
   exit 1
 fi
+assert_contains 'non-healthy state' "$tmpdir/poststart-health-unhealthy.err"
+if DOCKER_PS_HAS_HERMES=1 DOCKER_INSPECT_HERMES=exited FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-health-exited.out" 2> "$tmpdir/poststart-health-exited.err"; then
+  echo "poststart-refresh should fail when Hermes exits" >&2
+  exit 1
+fi
+assert_contains 'non-healthy state' "$tmpdir/poststart-health-exited.err"
+if DOCKER_PS_HAS_HERMES=1 DOCKER_INSPECT_HERMES=starting MS_QR1_HERMES_HEALTH_TIMEOUT=0 MS_QR1_HERMES_HEALTH_INTERVAL=0 FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$fixture_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh poststart-refresh > "$tmpdir/poststart-health-timeout.out" 2> "$tmpdir/poststart-health-timeout.err"; then
+  echo "poststart-refresh should fail when Hermes health times out" >&2
+  exit 1
+fi
+assert_contains 'timed out waiting for ods-hermes health=healthy' "$tmpdir/poststart-health-timeout.err"
 bad_soul_data="$tmpdir/bad-soul-data"
 mkdir -p "$bad_soul_data/persona/SOUL.md"
-if FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$bad_soul_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh > "$tmpdir/prestart-bad-soul.out" 2> "$tmpdir/prestart-bad-soul.err"; then
-  echo "pre-start provisioning should fail safely when SOUL.md is a directory" >&2
+FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$bad_soul_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh prestart-init > "$tmpdir/prestart-bad-soul.out"
+[[ -f "$bad_soul_data/persona/SOUL.md" && ! -d "$bad_soul_data/persona/SOUL.md" ]] || {
+  echo "prestart-init should repair an empty Docker-created SOUL.md directory behind quiescence" >&2
+  exit 1
+}
+nonempty_soul_data="$tmpdir/nonempty-soul-data"
+mkdir -p "$nonempty_soul_data/persona/SOUL.md"
+printf 'unexpected nested file\n' > "$nonempty_soul_data/persona/SOUL.md/nested"
+if FIXTURE_N8N_USER="$fixture_uid:$fixture_gid" MS_QR1_DATA_DIR="$nonempty_soul_data" "${env_prefix[@]}" scripts/ms-qr1-prestart-provision.sh prestart-init > "$tmpdir/prestart-nonempty-soul.out" 2> "$tmpdir/prestart-nonempty-soul.err"; then
+  echo "prestart-init should refuse non-empty SOUL.md directories" >&2
   exit 1
 fi
-assert_contains 'SOUL.md is a directory' "$tmpdir/prestart-bad-soul.err"
+assert_contains 'non-empty directory' "$tmpdir/prestart-nonempty-soul.err"
 
 cat > "$tmpdir/ss-state.txt" <<'EOF'
 State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
@@ -947,10 +1026,15 @@ assert_contains 'sha256sum -c -' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --no-start' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'scripts/ms-qr1-prestart-provision.sh prestart-init' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'sudo scripts/ms-qr1-prestart-provision.sh prestart-init' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'scripts/ms-qr1-prestart-provision.sh writer-services' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_contains 'scripts/ms-qr1-prestart-provision.sh verify-quiescent' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'scripts/ms-qr1-prestart-provision.sh poststart-refresh' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'quiescent container-writable state' scripts/ms-qr1-prestart-provision.sh
 assert_contains 'mktemp "$PERSONA_DIR/.SOUL.md.tmp.XXXXXX"' scripts/ms-qr1-prestart-provision.sh
+assert_not_contains '127.0.0.1:9119/api/status' scripts/ms-qr1-prestart-provision.sh
+assert_not_contains '127.0.0.1:9119/api/status' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
+assert_not_contains 'stop n8n hermes hermes-proxy dashboard-api || true' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'Runtime acceptance checks' ../AGENTS.md
 assert_contains 'up -d --no-deps --force-recreate hermes' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --force-recreate' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
@@ -971,6 +1055,13 @@ prestart = text.index("scripts/ms-qr1-prestart-provision.sh")
 network_create = text.index("up -d --build --no-start")
 if not prestart < network_create:
     raise SystemExit("QR1 pre-start provisioning must be documented before Compose --no-start")
+writer_services = text.index("writer-services")
+compose_stop = text.index(" stop $QR1_WRITER_SERVICES")
+verify = text.index("verify-quiescent")
+langfuse_hook = text.index("extensions/services/langfuse/hooks/post_install.sh")
+prestart_init = text.index("prestart-init")
+if not writer_services < compose_stop < verify < langfuse_hook < prestart_init:
+    raise SystemExit("QR1 runbook must stop and verify writers before privileged data hooks")
 PY
 
 COMPOSE_JSON="$(cat "$tmpdir/compose-config.json")" python3 - <<'PY'

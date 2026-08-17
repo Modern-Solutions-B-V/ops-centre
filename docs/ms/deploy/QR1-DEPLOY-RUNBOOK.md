@@ -198,8 +198,16 @@ containers that can write the affected persistent state are stopped. See
 acceptance checks are read-only and must not repair ownership, permissions or
 persona files.
 
+Sequence for this section:
+
+STOP WRITERS -> VERIFY QUIESCENCE -> PRIVILEGED PRESTART INITIALIZATION /
+REPAIR -> UNPRIVILEGED GENERATION / CONFIGURATION
+
 ```bash
-docker compose $(scripts/ms-qr1-compose-flags.sh) stop n8n hermes hermes-proxy dashboard-api || true
+QR1_WRITER_SERVICES="$(scripts/ms-qr1-prestart-provision.sh writer-services | tr '\n' ' ')"
+test -n "$QR1_WRITER_SERVICES"
+docker compose $(scripts/ms-qr1-compose-flags.sh) stop $QR1_WRITER_SERVICES
+scripts/ms-qr1-prestart-provision.sh verify-quiescent
 
 mkdir -p data/langfuse/postgres data/langfuse/clickhouse
 bash extensions/services/langfuse/hooks/post_install.sh "$PWD" "${GPU_BACKEND:-amd}"
@@ -226,7 +234,14 @@ printf '%s  %s\n' "$SDXL_SHA256" "${SDXL_FILE}.part" | sha256sum -c -
 mv -f "${SDXL_FILE}.part" "$SDXL_FILE"
 ```
 
-Expected: Langfuse PostgreSQL and ClickHouse bind-mount directories are owned for their container users; SDXL Lightning checkpoint exists only after SHA256 verification succeeds.
+Expected: the derived writer service list includes every rendered service with
+a writable bind mount intersecting `data/n8n`, `data/persona`, or
+`data/langfuse` such as n8n, dashboard-api and rendered Langfuse state
+writers. Compose stop succeeds, `verify-quiescent` confirms no corresponding
+writer container is running, and only then do the Langfuse ownership hook and
+QR1 `prestart-init` run. Langfuse PostgreSQL and ClickHouse bind-mount
+directories are owned for their container users; SDXL Lightning checkpoint
+exists only after SHA256 verification succeeds.
 `data/persona/SOUL.md` is a regular UTF-8 file generated through
 `scripts/build-installation-context.py` into a same-directory temporary file
 and atomically renamed into place; `data/persona/SOUL.md` is not a directory
@@ -259,7 +274,7 @@ stat -c '%U:%G %a %n' data/persona data/persona/SOUL.md data/n8n
 sha256sum data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors
 ```
 
-Rollback:
+Rollback after this section has completed and the stack is stopped:
 
 ```bash
 sudo rm -rf data/langfuse/postgres data/langfuse/clickhouse
@@ -267,13 +282,16 @@ rm -f data/comfyui/ComfyUI/models/checkpoints/sdxl_lightning_4step.safetensors*
 ```
 
 If a previous failed Compose attempt created `data/persona/SOUL.md` as a
-directory, stop the affected containers and repair it before rerunning this
-section:
+directory, do not manually remove/chown it. Rerun this section from the
+writer-stop gate and let `prestart-init` fail or perform the narrowly scoped
+repair behind verified quiescence. If the helper reports that manual removal
+is required, stop and capture that output for review rather than bypassing the
+quiescence gate.
 
 ```bash
-docker compose $(scripts/ms-qr1-compose-flags.sh) stop hermes hermes-proxy
-rm -rf data/persona/SOUL.md
-sudo chown "$(id -u):$(id -g)" data/persona
+QR1_WRITER_SERVICES="$(scripts/ms-qr1-prestart-provision.sh writer-services | tr '\n' ' ')"
+docker compose $(scripts/ms-qr1-compose-flags.sh) stop $QR1_WRITER_SERVICES
+scripts/ms-qr1-prestart-provision.sh verify-quiescent
 sudo scripts/ms-qr1-prestart-provision.sh prestart-init
 ```
 
@@ -402,15 +420,19 @@ Expected rollback: no `MS QR1 docker-to-host` rules remain. Use the helper rathe
 
 ## 11. Start QR1 Stack
 
+Sequence for the remaining lifecycle:
+
+START STACK -> POSTSTART UNPRIVILEGED REFRESH -> READ-ONLY ACCEPTANCE
+
 ```bash
 docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --build --force-recreate
 docker compose $(scripts/ms-qr1-compose-flags.sh) ps
 scripts/ms-qr1-prestart-provision.sh poststart-refresh
 ```
 
-Expected: approved QR1 services start. Native Ollama remains the inference path; no AMD tuning, UMA/GTT/IOMMU, Lemonade, ODS Tailscale, OpenClaw, Brave Search, ods-proxy, ODS OpenCode extension, remote-provider egress service, or remote-provider SSH tunnel starts. After services are up, the Hermes persona is refreshed again as the deployment user so the installation context can include running services. The helper atomically replaces `data/persona/SOUL.md`, then uses `docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps --force-recreate hermes` and the same command for `hermes-proxy` so Docker re-establishes the file bind mount against the new inode.
+Expected: approved QR1 services start. Native Ollama remains the inference path; no AMD tuning, UMA/GTT/IOMMU, Lemonade, ODS Tailscale, OpenClaw, Brave Search, ods-proxy, ODS OpenCode extension, remote-provider egress service, or remote-provider SSH tunnel starts. After services are up, the Hermes persona is refreshed again as the deployment user so the installation context can include running services. The helper atomically replaces `data/persona/SOUL.md`, invokes `docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps --force-recreate hermes` so Docker re-establishes the file bind mount against the new inode, waits for Docker health, copies `/opt/hermes/docker/SOUL.md` to `/opt/data/SOUL.md` inside the recreated container, invokes `docker compose $(scripts/ms-qr1-compose-flags.sh) restart hermes` so Hermes reloads persistent persona state, waits for Docker health again, then recreates `hermes-proxy`.
 
-Evidence: `docker compose ps`, successful `scripts/ms-qr1-prestart-provision.sh poststart-refresh` output, Compose recreate output for `hermes` and `hermes-proxy`, and `curl -fsS http://127.0.0.1:9119/api/status`. If Docker is unreachable, `ods-hermes` is not running before refresh, the recreate command fails, or Hermes does not return healthy, `poststart-refresh` must fail and the stack is not ready for acceptance evidence.
+Evidence: `docker compose ps`, successful `scripts/ms-qr1-prestart-provision.sh poststart-refresh` output, Compose recreate/restart output for `hermes` and `hermes-proxy`, `docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' ods-hermes`, and no host listener on port `9119`. If Docker is unreachable, `ods-hermes` is not running before refresh, the recreate/restart command fails, `docker exec` cannot sync `/opt/data/SOUL.md`, or Hermes Docker health does not become `healthy`, `poststart-refresh` must fail and the stack is not ready for acceptance evidence.
 
 Rollback:
 

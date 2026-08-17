@@ -26,6 +26,10 @@ Privileged initialization or repair must occur against quiescent state.
 Runtime validation must be read-only. Post-start refresh operations must not
 silently introduce privileged filesystem repair.
 
+For QR1, the quiescence gate is derived from rendered Compose writable bind
+mounts that intersect the persistent data trees being repaired, including
+`data/n8n`, `data/persona` and `data/langfuse`.
+
 ## Consequences
 
 - Repair uses an explicit stop -> repair -> start lifecycle where repair is
@@ -38,6 +42,9 @@ silently introduce privileged filesystem repair.
   lifecycle phase.
 - Operators take on slightly more sequencing in exchange for a simpler trust
   boundary.
+- Runbooks must present one authoritative repair path: stop derived writers,
+  verify quiescence, then run the reviewed helper or hook. Manual chown/chmod/rm
+  recovery against container-writable MS data must not bypass that sequence.
 
 ## Rejected Approach
 

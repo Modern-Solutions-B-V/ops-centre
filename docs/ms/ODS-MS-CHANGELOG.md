@@ -89,10 +89,12 @@ than the lifecycle boundary it was trying to replace.
 `scripts/ms-qr1-prestart-provision.sh prestart-init` is now the explicit
 idempotent QR1 initialization/repair gate. It runs before any Compose `up`,
 including `up --no-start`; derives the relevant writer containers from the
-rendered Compose bind mounts; fails closed before mutation if any writer of
-the affected data paths is running; ensures `data/persona` exists and is
+rendered Compose writable bind mounts intersecting `data/n8n`,
+`data/persona`, or `data/langfuse`; fails closed before mutation if any writer
+of the affected data paths is running; ensures `data/persona` exists and is
 operator-owned; fails closed if `data/persona` or `data/persona/SOUL.md` is a
-symlink; fails safely if `data/persona/SOUL.md` is a directory; generates the
+symlink; repairs an empty Docker-created `data/persona/SOUL.md` directory only
+behind verified quiescence; refuses non-empty directories; generates the
 persona through the existing `scripts/build-installation-context.py` into a
 same-directory temporary file; and atomically replaces `SOUL.md`. It resolves
 n8n's effective numeric UID/GID from the rendered Compose configuration,
@@ -110,9 +112,18 @@ After Compose startup, `scripts/ms-qr1-prestart-provision.sh poststart-refresh`
 must run as the deployment user, reruns the existing builder, atomically
 replaces `data/persona/SOUL.md`, recreates `hermes` and `hermes-proxy` through
 `docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps
---force-recreate ...`, and verifies Hermes health. It no longer uses
-`docker exec ods-hermes cp ...` because replacing the host file inode requires
-Docker to recreate the file bind mount.
+--force-recreate ...`, waits for Docker health on `ods-hermes`, syncs the
+repository-supported persistent persona path with
+`docker exec ods-hermes cp /opt/hermes/docker/SOUL.md /opt/data/SOUL.md`,
+restarts Hermes so it reloads persistent persona state, waits for Docker
+health again, and then recreates `hermes-proxy`. It no longer probes
+`127.0.0.1:9119` because QR1 intentionally keeps Hermes host port `9119`
+unbound.
+
+The QR1 runbook now has one authoritative repair path for container-writable
+MS data: derive writer services, stop them through Compose, verify quiescence,
+then run privileged hooks/helpers. The previous manual `rm`/`chown` persona
+recovery path and best-effort `|| true` writer stop were removed.
 
 ### Security / privacy impact
 Positive. The fix does not widen listener scope or add external fallback
@@ -123,6 +134,16 @@ containers are stopped, and does not recursively chown unrelated data paths or
 use world-writable permissions. Runtime acceptance checks are read-only.
 Acceptance now captures `ss -tlnp` before listener parsing and fails if the
 listener snapshot cannot be collected.
+
+### Privileged-operation audit
+Reviewed QR1-owned references to `sudo`, `chown`, `chmod`, `rm -rf`,
+privileged hooks, `|| true`, and check/acceptance mutation. Container-writable
+MS data mutations are now limited to: Langfuse `post_install.sh` after the
+runbook writer stop and `verify-quiescent` gate; `prestart-init` after its own
+writer-container gate; and documented rollback after stack stop. Runtime
+`check` and QR1 acceptance remain read-only. Other `sudo`/`rm` occurrences are
+host service/firewall/package/checkpoint rollback operations outside
+container-writable MS persistent data, or test fixtures.
 
 ### Upgrade / upstream impact
 Low. Runtime behavior remains isolated to QR1 helper/service paths and the new
@@ -148,8 +169,8 @@ Pending post-merge EVO-X3 live qualification steps:
 7. Verify dashboard-api -> Ollama default-Host `/api/tags` returns HTTP `200`.
 8. Verify live streaming first-token behavior through the proxy.
 9. Verify n8n remains healthy after normalization.
-10. Verify Hermes post-start persona refresh recreates Hermes and Hermes reads
-    the refreshed persona.
+10. Verify Hermes post-start persona refresh recreates Hermes, syncs
+    `/opt/data/SOUL.md`, and Hermes reads the refreshed persona.
 11. Verify UFW/default-deny posture is unchanged.
 12. Run full QR1 acceptance.
 
