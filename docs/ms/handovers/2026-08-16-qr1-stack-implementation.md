@@ -44,14 +44,35 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 - EVO-X3 hardware qualification of merged `ms/main` at `c8cc43fb` reached the Ollama bridge replacement step and stopped because Ubuntu 24.04 `systemd-analyze verify` rejected `WorkingDirectory="/home/modi/ms-ops/ops-centre/ods"` as a non-absolute path. The one-line unit correction is to render `WorkingDirectory=/home/modi/ms-ops/ops-centre/ods` while preserving `ExecStart="/usr/local/libexec/ms-qr1/ms-qr1-ollama-bridge.sh" serve`. EVO-X3 remains on the legacy socat bridge until this fix is reviewed and merged.
 - EVO-X3 hardware qualification of merged `ms/main` at `57f32ac0` then reached the blocking QR1 acceptance gate after HTTP bridge replacement, container default-Host Ollama routing, UFW/listener inspection, full stack health, Hermes post-start refresh, and no host `9119` listener all passed. The first acceptance execution had 13 checks pass and 2 false-positive assumptions: approved host Tailscale Serve tailnet `11434` listeners were mistaken for non-gateway bridge binds, and the documented Hermes proxy `303 Location: /auth/required` unauthenticated redirect was not accepted. Qualification remains pending until the corrected acceptance gate returns zero.
 - EVO-X3 hardware qualification of merged `ms/main` at `f3a5a3ca` confirmed Hermes acceptance passed and only `live QR1 service listeners are loopback and bridge listeners are not wildcard` still failed. Root cause: actual `tailscale serve status` prints approved Serve mappings with tree prefixes (`|-- tcp://...` and `|--> tcp://127.0.0.1:11434`), while the PR #9 fixture used sanitized `tcp://...` / `--> ...` lines. Qualification remains pending until the live-format parser correction is reviewed, merged, and the gate returns zero on EVO-X3.
+- EVO-X3 hardware qualification of merged `ms/main` at `b7ede9f3` is PASS. All corrective PRs are merged. The final live host had the full QR1 stack healthy, active and systemd-valid Ollama bridge, expected gateway/loopback/Tailscale listeners, UFW scoped to Tailscale plus Docker CIDR `172.19.0.0/16` for TCP `11434` and `7710`, `qwen3.8:27b` present in Ollama, prestart check `PRESTART_CHECK_RC=0`, and blocking QR1 acceptance `FINAL_ACCEPTANCE_RC=0` with `All QR1 acceptance checks passed`.
+
+## Qualification Closeout
+
+QR1 EVO-X3 qualification status: **PASS** on merged `ms/main` commit
+`b7ede9f3`.
+
+Live defects discovered and resolved during qualification:
+
+1. Raw `socat` bridge preserved `Host: ms-qr1-host:11434` and caused Ollama
+   HTTP `403`.
+2. Hermes `SOUL.md` bind source could become a directory before provisioning.
+3. n8n persistent data ownership was wrong on clean deployment.
+4. Privileged persistent-state repair required quiescent writer enforcement.
+5. Ubuntu 24.04 rejected the generated systemd `WorkingDirectory=` rendering.
+6. QR1 acceptance needed to account for intended Hermes auth redirect behavior.
+7. QR1 acceptance needed to parse actual Tailscale Serve tree output.
+
+Final acceptance evidence:
+
+```text
+All QR1 acceptance checks passed
+FINAL_ACCEPTANCE_RC=0
+```
 
 ## Validation To Repeat On Deploy Host
 
-For `fix/qr1-ollama-http-proxy`, local/static/CI validation passed, but
-hardware-backed EVO-X3 validation of the corrective proxy/provisioner remains
-pending until after merge. The current EVO-X3 host remains on the previous
-merged baseline and this branch does not claim operational readiness until the
-post-merge QR1 acceptance runbook is completed on hardware.
+The full EVO-X3 QR1 hardware qualification has passed. Repeat the following
+only for future upgrade, regression or requalification runs.
 
 ```bash
 cd ods
