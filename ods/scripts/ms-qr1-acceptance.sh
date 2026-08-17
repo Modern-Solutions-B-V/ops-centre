@@ -42,7 +42,7 @@ http_status() {
 
 http_status_and_location() {
   local url="$1"
-  curl -sS -o /dev/null -D - -w 'HTTP_STATUS:%{http_code}' "$url"
+  curl -q -sS -o /dev/null -D - -w 'HTTP_STATUS:%{http_code}' "$url"
 }
 
 expect_http_status() {
@@ -62,30 +62,71 @@ expect_http_status() {
 }
 
 expect_http_status_or_auth_redirect() {
-  local url="$1" response status location_count location
+  local url="$1" response
   if ! response="$(http_status_and_location "$url")"; then
     echo "transport failure for $url" >&2
     return 1
   fi
-  status="$(printf '%s\n' "$response" | awk -F: '/^HTTP_STATUS:/ {print $2}' | tail -1 | tr -d '\r')"
-  case "$status" in
-    401|403|404)
-      return 0
-      ;;
-    303)
-      location_count="$(printf '%s\n' "$response" | awk 'BEGIN{count=0} {colon=index($0, ":"); if (colon > 0 && tolower(substr($0, 1, colon - 1)) == "location") count++} END {print count}')"
-      location="$(printf '%s\n' "$response" | awk '{colon=index($0, ":"); if (colon > 0 && tolower(substr($0, 1, colon - 1)) == "location") {value=substr($0, colon + 1); sub(/^[[:space:]]*/, "", value); gsub(/\r/, "", value); print value; exit}}')"
-      if [[ "$location_count" == "1" && "$location" == "/auth/required" ]]; then
-        return 0
-      fi
-      echo "unexpected HTTP redirect for $url: 303 Location count=$location_count value=${location:-<missing>}; expected exactly one /auth/required" >&2
-      return 1
-      ;;
-    *)
-      echo "unexpected HTTP status for $url: ${status:-<missing>}; expected 401, 403, 404, or 303 Location: /auth/required" >&2
-      return 1
-      ;;
-  esac
+  HERMES_HEADER_DUMP="$response" HERMES_PROBE_URL="$url" python3 - <<'PY'
+import os
+import re
+import sys
+
+url = os.environ["HERMES_PROBE_URL"]
+blocks = []
+current = None
+
+def finish_current():
+    global current
+    if current is not None:
+        blocks.append(current)
+        current = None
+
+for raw in os.environ["HERMES_HEADER_DUMP"].splitlines():
+    line = raw.rstrip("\r")
+    status_match = re.match(r"^HTTP/\S+\s+(\d{3})(?:\s|$)", line)
+    if status_match:
+        finish_current()
+        current = {"status": int(status_match.group(1)), "headers": []}
+        continue
+    if line.startswith("HTTP_STATUS:"):
+        finish_current()
+        continue
+    if current is None:
+        if line == "":
+            continue
+        print(f"unexpected HTTP header dump for {url}: header outside response block", file=sys.stderr)
+        sys.exit(1)
+    if line == "":
+        finish_current()
+        continue
+    if ":" not in line:
+        print(f"unexpected HTTP header dump for {url}: malformed header line", file=sys.stderr)
+        sys.exit(1)
+    name, value = line.split(":", 1)
+    current["headers"].append((name.strip().lower(), value.strip()))
+
+finish_current()
+final_blocks = [block for block in blocks if block["status"] < 100 or block["status"] >= 200]
+if not final_blocks:
+    print(f"unexpected HTTP status for {url}: <missing>; expected 401, 403, 404, or 303 Location: /auth/required", file=sys.stderr)
+    sys.exit(1)
+
+final = final_blocks[-1]
+status = final["status"]
+if status in {401, 403, 404}:
+    sys.exit(0)
+if status == 303:
+    locations = [value for name, value in final["headers"] if name == "location"]
+    if len(locations) == 1 and locations[0] == "/auth/required":
+        sys.exit(0)
+    value = locations[0] if locations else "<missing>"
+    print(f"unexpected HTTP redirect for {url}: 303 Location count={len(locations)} value={value}; expected exactly one /auth/required", file=sys.stderr)
+    sys.exit(1)
+
+print(f"unexpected HTTP status for {url}: {status}; expected 401, 403, 404, or 303 Location: /auth/required", file=sys.stderr)
+sys.exit(1)
+PY
 }
 
 check_no_fallbacks() {
@@ -272,8 +313,9 @@ lines = os.environ["TAILSCALE_SERVE_STATUS"].splitlines()
 source_re = re.compile(r"^(tcp|https?)://(?:\[([^\]]+)\]|([^:\s]+)):(\d+)(?:\s+\(tailnet only\))?$")
 target_re = re.compile(r"^-->\s*((?:tcp|https?)://[^\s]+)$")
 approved = set()
-mappings = {}
+seen_sources = set()
 pending = []
+pending_family = None
 
 for raw_line in lines:
     line = raw_line.strip()
@@ -286,10 +328,13 @@ for raw_line in lines:
         target = target_match.group(1)
         for scheme, addr, port in pending:
             key = (scheme, addr, port)
-            if key in mappings:
+            if key in seen_sources:
                 raise SystemExit(1)
-            mappings[key] = target
+            seen_sources.add(key)
+            if scheme == "tcp" and port == "11434" and addr in assigned and target == "tcp://127.0.0.1:11434":
+                approved.add(addr)
         pending = []
+        pending_family = None
         continue
 
     match = source_re.match(line)
@@ -298,14 +343,15 @@ for raw_line in lines:
     scheme = match.group(1)
     addr = match.group(2) or match.group(3)
     port = match.group(4)
+    family = (scheme, port)
+    if pending_family is None:
+        pending_family = family
+    elif pending_family != family:
+        raise SystemExit(1)
     pending.append((scheme, addr, port))
 
 if pending:
     raise SystemExit(1)
-
-for (scheme, addr, port), target in mappings.items():
-    if scheme == "tcp" and port == "11434" and addr in assigned and target == "tcp://127.0.0.1:11434":
-        approved.add(addr)
 
 for addr in sorted(approved):
     print(addr)

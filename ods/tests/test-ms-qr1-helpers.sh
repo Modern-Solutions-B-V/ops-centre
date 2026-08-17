@@ -315,6 +315,8 @@ emit_response() {
     303-auth) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-auth-lower) printf 'HTTP/1.1 303 See Other\r\nlocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-auth-mixed) printf 'HTTP/1.1 303 See Other\r\nLoCaTiOn: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    103-location-303-missing) printf 'HTTP/1.1 103 Early Hints\r\nLocation: /auth/required\r\n\r\nHTTP/1.1 303 See Other\r\n\r\nHTTP_STATUS:303' ;;
+    103-303-auth) printf 'HTTP/1.1 103 Early Hints\r\nLink: </auth/required>; rel=preload\r\n\r\nHTTP/1.1 303 See Other\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-duplicate-identical) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-duplicate-identical-case) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nlocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-duplicate-conflicting) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
@@ -337,6 +339,10 @@ if [[ "$*" == *"127.0.0.1:9119/api/status"* ]]; then
   fi
   printf '{"ok":true}\n'
   exit 0
+fi
+if [[ "${CURL_REQUIRE_Q:-0}" == "1" && "$*" != *"-q"* ]]; then
+  echo "curl fixture expected -q" >&2
+  exit 61
 fi
 if [[ "$*" == *" -D - "* || "$*" == *"-D -"* ]]; then
   emit_response
@@ -1219,6 +1225,26 @@ if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_l
 fi
 assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-nearby-target.out"
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+https://evox3.tailfc79e6.ts.net:443
+tcp://100.116.5.69:11434
+--> tcp://127.0.0.1:11434
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-tail-incomplete-mixed.out" 2> "$tmpdir/ss-tail-incomplete-mixed.err"; then
+  echo "listener acceptance should fail when an incomplete HTTPS source is mixed with a TCP Ollama source before a target" >&2
+  exit 1
+fi
+assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-incomplete-mixed.out"
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+tcp://100.116.5.69:11434
+tcp://100.116.5.69:443
+--> tcp://127.0.0.1:11434
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-tail-mixed-source-family.out" 2> "$tmpdir/ss-tail-mixed-source-family.err"; then
+  echo "listener acceptance should fail when one source group mixes unrelated TCP ports" >&2
+  exit 1
+fi
+assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-mixed-source-family.out"
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
 tcp://100.116.5.69:11434
 --> tcp://127.0.0.1:11434
 tcp://100.116.5.69:11434
@@ -1284,10 +1310,16 @@ cat > "$tmpdir/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "$*" == *" -D - "* || "$*" == *"-D -"* ]]; then
+  if [[ "${CURL_REQUIRE_Q:-0}" == "1" && "$*" != *"-q"* ]]; then
+    echo "curl fixture expected -q" >&2
+    exit 61
+  fi
   case "${CURL_MODE:-401}" in
     303-auth) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-auth-lower) printf 'HTTP/1.1 303 See Other\r\nlocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-auth-mixed) printf 'HTTP/1.1 303 See Other\r\nLoCaTiOn: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    103-location-303-missing) printf 'HTTP/1.1 103 Early Hints\r\nLocation: /auth/required\r\n\r\nHTTP/1.1 303 See Other\r\n\r\nHTTP_STATUS:303' ;;
+    103-303-auth) printf 'HTTP/1.1 103 Early Hints\r\nLink: </auth/required>; rel=preload\r\n\r\nHTTP/1.1 303 See Other\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-duplicate-identical) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-duplicate-identical-case) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nlocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-duplicate-conflicting) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
@@ -1321,6 +1353,8 @@ EOF
 CURL_MODE=303-auth "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
 CURL_MODE=303-auth-lower "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
 CURL_MODE=303-auth-mixed "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
+CURL_MODE=103-303-auth "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
+CURL_MODE=303-auth CURL_REQUIRE_Q=1 "${env_prefix[@]}" bash -c 'mkdir -p "$FIXTURE_DIR/home-with-curlrc"; printf "location\n" > "$FIXTURE_DIR/home-with-curlrc/.curlrc"; export HOME="$FIXTURE_DIR/home-with-curlrc"; source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
 CURL_MODE=401 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
 CURL_MODE=403 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
 CURL_MODE=404 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
@@ -1354,6 +1388,11 @@ if CURL_MODE=303-missing "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-accep
   exit 1
 fi
 assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-missing.err"
+if CURL_MODE=103-location-303-missing "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-103-location-final-missing.out" 2> "$tmpdir/hermes-103-location-final-missing.err"; then
+  echo "Hermes TUI acceptance should fail when Location appears only in an interim 103 response" >&2
+  exit 1
+fi
+assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-103-location-final-missing.err"
 if CURL_MODE=303-query "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-query.out" 2> "$tmpdir/hermes-redirect-query.err"; then
   echo "Hermes TUI acceptance should fail when auth redirect includes a query string" >&2
   exit 1
