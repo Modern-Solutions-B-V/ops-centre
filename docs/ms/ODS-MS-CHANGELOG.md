@@ -17,7 +17,7 @@ change must be recorded here in the same commit/PR that makes the change.
 Codex
 
 ### Branch / PR
-`fix/qr1-acceptance-tailscale-hermes` / PR pending
+`fix/qr1-acceptance-tailscale-hermes` / PR #9
 
 ### ODS baseline
 `v2.6.0`
@@ -63,14 +63,16 @@ response outside `401`, `403` or `404`.
 The listener check still rejects wildcard `0.0.0.0:11434` / `[::]:11434` and
 arbitrary LAN or non-gateway listeners. It now exempts an extra `:11434`
 listener only when its exact address is assigned to `tailscale0` and
-`tailscale serve status` shows TCP `11434` for that tailnet address forwarding
-to `tcp://127.0.0.1:11434`. If Tailscale Serve is absent or cannot prove the
-mapping, no extra listener is exempted.
+`tailscale serve status` shows that same logical TCP `11434` Serve mapping
+forwards to `tcp://127.0.0.1:11434`. Malformed, duplicate or ambiguous Serve
+output is fail-closed. If Tailscale Serve is absent or cannot prove the mapping,
+no extra listener is exempted.
 
 The Hermes check still requires host port `9119` to be unbound and still fails
 unauthenticated `200`. It now accepts `303` only with exact
 `Location: /auth/required`, matching the reviewed Caddy auth contract, and does
-not follow redirects.
+not follow redirects. A `303` must contain exactly one `Location` header; zero,
+duplicate or absolute/query redirects fail.
 
 ### Security / privacy impact
 Neutral to positive. This is an acceptance-contract correction only. It does

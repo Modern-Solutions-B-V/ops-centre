@@ -313,8 +313,12 @@ set -euo pipefail
 emit_response() {
   case "${CURL_MODE:-401}" in
     303-auth) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-duplicate-identical) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-duplicate-conflicting) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
     303-other) printf 'HTTP/1.1 303 See Other\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
     303-missing) printf 'HTTP/1.1 303 See Other\r\n\r\nHTTP_STATUS:303' ;;
+    303-query) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required?x=1\r\n\r\nHTTP_STATUS:303' ;;
+    303-absolute) printf 'HTTP/1.1 303 See Other\r\nLocation: https://example.invalid/auth/required\r\n\r\nHTTP_STATUS:303' ;;
     401) printf 'HTTP/1.1 401 Unauthorized\r\n\r\nHTTP_STATUS:401' ;;
     403) printf 'HTTP/1.1 403 Forbidden\r\n\r\nHTTP_STATUS:403' ;;
     404) printf 'HTTP/1.1 404 Not Found\r\n\r\nHTTP_STATUS:404' ;;
@@ -1125,6 +1129,30 @@ LISTEN 0      4096   [fd7a:115c:a1e0::a801:5c2]:11434     [::]:*            user
 LISTEN 0      4096   127.0.0.1:4000                       0.0.0.0:*         users:(("docker-proxy",pid=14,fd=3))
 EOF
 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
+cat > "$tmpdir/ss-state.txt" <<'EOF'
+State  Recv-Q Send-Q Local Address:Port                   Peer Address:Port Process
+LISTEN 0      4096   127.0.0.1:11434                      0.0.0.0:*         users:(("ollama",pid=10,fd=3))
+LISTEN 0      4096   172.31.0.1:11434                     0.0.0.0:*         users:(("python3",pid=11,fd=3))
+LISTEN 0      4096   172.20.0.1:11434                     0.0.0.0:*         users:(("python3",pid=12,fd=3))
+LISTEN 0      4096   100.116.5.69:11434                   0.0.0.0:*         users:(("tailscaled",pid=15,fd=3))
+EOF
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+tcp://100.116.5.69:11434
+--> tcp://127.0.0.1:11434
+EOF
+"${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
+cat > "$tmpdir/ss-state.txt" <<'EOF'
+State  Recv-Q Send-Q Local Address:Port                   Peer Address:Port Process
+LISTEN 0      4096   127.0.0.1:11434                      0.0.0.0:*         users:(("ollama",pid=10,fd=3))
+LISTEN 0      4096   172.31.0.1:11434                     0.0.0.0:*         users:(("python3",pid=11,fd=3))
+LISTEN 0      4096   172.20.0.1:11434                     0.0.0.0:*         users:(("python3",pid=12,fd=3))
+LISTEN 0      4096   [fd7a:115c:a1e0::a801:5c2]:11434     [::]:*            users:(("tailscaled",pid=16,fd=3))
+EOF
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+tcp://[fd7a:115c:a1e0::a801:5c2]:11434
+--> tcp://127.0.0.1:11434
+EOF
+"${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
 tcp://evox3.tailfc79e6.ts.net:443 (tailnet only)
 --> tcp://127.0.0.1:3001
@@ -1145,6 +1173,44 @@ if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_l
   exit 1
 fi
 assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-wrong-target.out"
+cat > "$tmpdir/ss-state.txt" <<'EOF'
+State  Recv-Q Send-Q Local Address:Port                   Peer Address:Port Process
+LISTEN 0      4096   127.0.0.1:11434                      0.0.0.0:*         users:(("ollama",pid=10,fd=3))
+LISTEN 0      4096   172.31.0.1:11434                     0.0.0.0:*         users:(("python3",pid=11,fd=3))
+LISTEN 0      4096   172.20.0.1:11434                     0.0.0.0:*         users:(("python3",pid=12,fd=3))
+LISTEN 0      4096   100.116.5.69:11434                   0.0.0.0:*         users:(("tailscaled",pid=15,fd=3))
+EOF
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+tcp://100.116.5.69:11434
+--> tcp://127.0.0.1:3001
+tcp://100.116.5.69:443
+--> tcp://127.0.0.1:11434
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-tail-nearby-target.out" 2> "$tmpdir/ss-tail-nearby-target.err"; then
+  echo "listener acceptance should fail when only a nearby different Serve mapping targets Ollama loopback" >&2
+  exit 1
+fi
+assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-nearby-target.out"
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+tcp://100.116.5.69:11434
+--> tcp://127.0.0.1:11434
+tcp://100.116.5.69:11434
+--> tcp://127.0.0.1:11434
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-tail-duplicate.out" 2> "$tmpdir/ss-tail-duplicate.err"; then
+  echo "listener acceptance should fail on duplicate ambiguous Tailscale Serve 11434 mappings" >&2
+  exit 1
+fi
+assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-duplicate.out"
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+tcp://100.116.5.69:11434
+this is not a serve target line
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-tail-malformed.out" 2> "$tmpdir/ss-tail-malformed.err"; then
+  echo "listener acceptance should fail closed on malformed Tailscale Serve output" >&2
+  exit 1
+fi
+assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-malformed.out"
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
 tcp://evox3.tailfc79e6.ts.net:11434 (tailnet only)
 tcp://100.116.5.69:11434
@@ -1182,7 +1248,12 @@ set -euo pipefail
 if [[ "$*" == *" -D - "* || "$*" == *"-D -"* ]]; then
   case "${CURL_MODE:-401}" in
     303-auth) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-duplicate-identical) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-duplicate-conflicting) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
     303-other) printf 'HTTP/1.1 303 See Other\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
+    303-missing) printf 'HTTP/1.1 303 See Other\r\n\r\nHTTP_STATUS:303' ;;
+    303-query) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required?x=1\r\n\r\nHTTP_STATUS:303' ;;
+    303-absolute) printf 'HTTP/1.1 303 See Other\r\nLocation: https://example.invalid/auth/required\r\n\r\nHTTP_STATUS:303' ;;
     401) printf 'HTTP/1.1 401 Unauthorized\r\n\r\nHTTP_STATUS:401' ;;
     403) printf 'HTTP/1.1 403 Forbidden\r\n\r\nHTTP_STATUS:403' ;;
     404) printf 'HTTP/1.1 404 Not Found\r\n\r\nHTTP_STATUS:404' ;;
@@ -1214,6 +1285,31 @@ if CURL_MODE=303-other "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-accepta
   exit 1
 fi
 assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-bad.err"
+if CURL_MODE=303-duplicate-identical "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-duplicate-identical.out" 2> "$tmpdir/hermes-redirect-duplicate-identical.err"; then
+  echo "Hermes TUI acceptance should fail on duplicate identical Location headers" >&2
+  exit 1
+fi
+assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-duplicate-identical.err"
+if CURL_MODE=303-duplicate-conflicting "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-duplicate-conflicting.out" 2> "$tmpdir/hermes-redirect-duplicate-conflicting.err"; then
+  echo "Hermes TUI acceptance should fail on duplicate conflicting Location headers" >&2
+  exit 1
+fi
+assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-duplicate-conflicting.err"
+if CURL_MODE=303-missing "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-missing.out" 2> "$tmpdir/hermes-redirect-missing.err"; then
+  echo "Hermes TUI acceptance should fail when 303 has no Location header" >&2
+  exit 1
+fi
+assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-missing.err"
+if CURL_MODE=303-query "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-query.out" 2> "$tmpdir/hermes-redirect-query.err"; then
+  echo "Hermes TUI acceptance should fail when auth redirect includes a query string" >&2
+  exit 1
+fi
+assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-query.err"
+if CURL_MODE=303-absolute "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-absolute.out" 2> "$tmpdir/hermes-redirect-absolute.err"; then
+  echo "Hermes TUI acceptance should fail on absolute URL redirects" >&2
+  exit 1
+fi
+assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-absolute.err"
 if CURL_MODE=200 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-200.out" 2> "$tmpdir/hermes-200.err"; then
   echo "Hermes TUI acceptance should fail when unauthenticated PTY returns 200" >&2
   exit 1

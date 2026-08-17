@@ -62,7 +62,7 @@ expect_http_status() {
 }
 
 expect_http_status_or_auth_redirect() {
-  local url="$1" response status location
+  local url="$1" response status location_count location
   if ! response="$(http_status_and_location "$url")"; then
     echo "transport failure for $url" >&2
     return 1
@@ -73,11 +73,12 @@ expect_http_status_or_auth_redirect() {
       return 0
       ;;
     303)
+      location_count="$(printf '%s\n' "$response" | awk 'BEGIN{IGNORECASE=1; count=0} /^Location:/ {count++} END {print count}')"
       location="$(printf '%s\n' "$response" | awk 'BEGIN{IGNORECASE=1} /^Location:/ {sub(/^[^:]*:[[:space:]]*/, ""); gsub(/\r/, ""); print; exit}')"
-      if [[ "$location" == "/auth/required" ]]; then
+      if [[ "$location_count" == "1" && "$location" == "/auth/required" ]]; then
         return 0
       fi
-      echo "unexpected HTTP redirect for $url: 303 Location: ${location:-<missing>}; expected /auth/required" >&2
+      echo "unexpected HTTP redirect for $url: 303 Location count=$location_count value=${location:-<missing>}; expected exactly one /auth/required" >&2
       return 1
       ;;
     *)
@@ -268,16 +269,41 @@ for line in os.environ["TAILSCALE_ADDRS"].splitlines():
             assigned.add(str(ipaddress.ip_interface(parts[idx + 1]).ip))
 
 lines = os.environ["TAILSCALE_SERVE_STATUS"].splitlines()
+source_re = re.compile(r"^tcp://(?:\[([^\]]+)\]|([^:\s]+)):(\d+)(?:\s+\(tailnet only\))?$")
+target_re = re.compile(r"^-->\s*(tcp://[^\s]+)$")
 approved = set()
-for idx, line in enumerate(lines):
-    match = re.search(r"tcp://(?:\[([^\]]+)\]|([^:\s]+)):11434(?:\s|$)", line)
+mappings = {}
+pending = []
+
+for raw_line in lines:
+    line = raw_line.strip()
+    if not line:
+        continue
+    target_match = target_re.match(line)
+    if target_match:
+        if not pending:
+            raise SystemExit(1)
+        target = target_match.group(1)
+        for addr, port in pending:
+            key = (addr, port)
+            if key in mappings:
+                raise SystemExit(1)
+            mappings[key] = target
+        pending = []
+        continue
+
+    match = source_re.match(line)
     if not match:
-        continue
+        raise SystemExit(1)
     addr = match.group(1) or match.group(2)
-    if addr not in assigned:
-        continue
-    block = "\n".join(lines[idx:idx + 4])
-    if "tcp://127.0.0.1:11434" in block:
+    port = match.group(3)
+    pending.append((addr, port))
+
+if pending:
+    raise SystemExit(1)
+
+for (addr, port), target in mappings.items():
+    if port == "11434" and addr in assigned and target == "tcp://127.0.0.1:11434":
         approved.add(addr)
 
 for addr in sorted(approved):
