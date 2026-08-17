@@ -117,6 +117,15 @@ def test_setup_status_includes_personas_available(test_client, setup_config_dir)
     assert "creative" in available
 
 
+def test_setup_status_marks_qr1_registration_only(test_client, setup_config_dir):
+    with patch("routers.setup.is_ms_qr1_deployment", return_value=True):
+        resp = test_client.get("/api/setup/status", headers=test_client.auth_headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["deployment_mode"] == "ms-qr1"
+    assert data["template_application_enabled"] is False
+
+
 def test_setup_status_tolerates_corrupt_progress_file(test_client, setup_config_dir):
     """Corrupt setup-progress.json falls back to step=0 without crashing."""
     (setup_config_dir / "setup-progress.json").write_text("not-valid-json{{")

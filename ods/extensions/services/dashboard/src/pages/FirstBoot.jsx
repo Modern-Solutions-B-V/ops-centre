@@ -75,7 +75,7 @@ function clearProgress() {
   }
 }
 
-export default function FirstBoot({ onComplete }) {
+export default function FirstBoot({ onComplete, setupStatus = null }) {
   const initial = useMemo(() => readProgress() || {}, [])
   const [step, setStep] = useState(initial.step || 1)
   const [deviceName, setDeviceName] = useState(initial.deviceName || 'ods')
@@ -96,6 +96,8 @@ export default function FirstBoot({ onComplete }) {
   const ownerCardStatusLoading = ownerCardStatus === null
   const ownerCardUnavailable = ownerCardStatus?.ready === false
   const ownerCardUnavailableReason = ownerCardStatus?.reason || 'Enable ODS proxy before generating owner cards.'
+  const qr1RegistrationOnly = setupStatus?.deployment_mode === 'ms-qr1' ||
+    setupStatus?.template_application_enabled === false
 
   useEffect(() => {
     let cancelled = false
@@ -139,7 +141,7 @@ export default function FirstBoot({ onComplete }) {
         throw new Error('The selected stack is no longer available. Go back and choose another option.')
       }
 
-      if (selectedStack.templateId) {
+      if (selectedStack.templateId && !qr1RegistrationOnly) {
         const applyResp = await fetch(`/api/templates/${selectedStack.templateId}/apply`, {
           method: 'POST',
         })

@@ -551,7 +551,71 @@ Evidence: command outputs.
 
 Rollback for failed blocking acceptance: capture logs, then run the stack rollback in section 11, UFW rollback in section 10, Ollama bridge rollback in section 9, and host-agent rollback in section 8.
 
-## 15. Host-Agent nmcli Boundary
+## 15. QR1 Operator First Boot And Readiness
+
+QR1 first boot is registration/operator setup only. Do not apply generic ODS
+stack templates after QR1 has already been selected, hardened and qualified.
+The dashboard-api detects QR1 from `MS_QR1_HOST_GATEWAY` and the first-boot
+wizard skips template application in QR1; the backend template endpoint also
+returns a QR1 no-op receipt if called directly.
+
+Open WebUI remains authenticated and signup remains disabled. For a fresh
+database, populate the Open WebUI first-admin email and password in `.env`
+through the existing secret-handling process, then recreate only Open WebUI:
+
+```bash
+# Edit .env locally; do not print the password to logs or terminal transcripts.
+$EDITOR .env
+docker compose $(scripts/ms-qr1-compose-flags.sh) up -d --no-deps --force-recreate open-webui
+```
+
+Required `.env` intent:
+
+- `WEBUI_AUTH` remains `true`.
+- `WEBUI_ENABLE_SIGNUP` remains `false`.
+- `OPEN_WEBUI_ADMIN_EMAIL` is set to the operator admin email.
+- `OPEN_WEBUI_ADMIN_PASSWORD` is set to a strong secret.
+- `OPEN_WEBUI_ADMIN_NAME` may remain the QR1 default or be set to a display
+  name.
+
+Open WebUI creates the configured admin only when no users exist in
+`data/open-webui/webui.db`; existing users are not overwritten on restart.
+
+Run one consolidated readiness sweep:
+
+```bash
+scripts/ms-qr1-operator-readiness.sh
+scripts/ms-qr1-operator-readiness.sh --json > /tmp/qr1-operator-readiness.json
+```
+
+Expected: the report classifies every scoped QR1 capability as
+operator-facing or internal-platform, shows container health, a shallow
+non-destructive probe, auth/bootstrap readiness, dependency state, and the
+canonical operator URL where a route is approved.
+
+Approved QR1 operator launch URLs:
+
+- Dashboard: `https://evox3.tailfc79e6.ts.net`
+- Open WebUI: `https://evox3.tailfc79e6.ts.net:8443` while the temporary
+  private operator test route remains configured.
+
+Do not add Tailscale Serve routes for internal services merely because they
+publish loopback ports. Internal services such as LiteLLM, Model Router,
+Qdrant, embeddings, SearXNG, Privacy Shield, Token Spy, APE, Whisper, TTS and
+Langfuse backing services remain internal unless a separate reviewed operator
+access change approves a route. n8n, Langfuse, Perplexica and ComfyUI are
+classified as operator-facing capabilities, but QR1 does not approve new
+remote routes for them by default in this readiness PR.
+
+Evidence: readiness table, `/tmp/qr1-operator-readiness.json`, and the
+dashboard Quick Links showing QR1 public URLs only where configured through
+the approved public URL env mechanism.
+
+Rollback: remove the Open WebUI first-admin values from `.env` if they were
+added only for bootstrap, then recreate `open-webui`. Do not enable signup or
+open public signup during rollback.
+
+## 16. Host-Agent nmcli Boundary
 
 No supported QR1 config switch exists to remove the host-agent nmcli/Wi-Fi routes. QR1 keeps stock host-agent behavior and relies on API-key authentication plus Docker-gateway/UFW scoping.
 
@@ -578,7 +642,7 @@ Rollback: stop host-agent if the boundary fails:
 sudo systemctl stop ods-host-agent.service
 ```
 
-## 16. Full Rollback
+## 17. Full Rollback
 
 ```bash
 cd ~/ms-ops/ops-centre/ods

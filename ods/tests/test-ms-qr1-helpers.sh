@@ -1445,11 +1445,14 @@ for f in \
   scripts/ms-qr1-prestart-provision.sh \
   scripts/ms-qr1-ollama-bridge.sh \
   scripts/ms-qr1-acceptance.sh \
+  scripts/ms-qr1-operator-readiness.sh \
+  tests/test-ms-qr1-operator-readiness.sh \
   extensions/services/langfuse/hooks/post_install.sh \
   lib/rootless-ownership.sh; do
   bash -n "$f"
 done
 PYTHONPYCACHEPREFIX="$tmpdir/pycache" python3 -m py_compile scripts/ms-qr1-ollama-http-proxy.py
+PYTHONPYCACHEPREFIX="$tmpdir/pycache" python3 -m py_compile scripts/ms-qr1-operator-readiness.py
 
 cat > "$tmpdir/bad.sh" <<'SH'
 if [[ -z "$x" && command -v docker ]]; then
@@ -1479,6 +1482,14 @@ assert_contains 'check_live_listeners_loopback_and_bridge_no_wildcard' scripts/m
 assert_contains 'scripts/ms-qr1-ollama-bridge.sh expected-listeners' scripts/ms-qr1-acceptance.sh
 assert_contains 'non-gateway QR1 Ollama bridge bind' scripts/ms-qr1-acceptance.sh
 assert_contains 'services=("litellm" "${services[@]}")' scripts/ms-qr1-acceptance.sh
+assert_contains 'WEBUI_ADMIN_EMAIL: "${OPEN_WEBUI_ADMIN_EMAIL:-}"' docker-compose.ms-qr1.yml
+assert_contains 'WEBUI_ADMIN_PASSWORD: "${OPEN_WEBUI_ADMIN_PASSWORD:-}"' docker-compose.ms-qr1.yml
+assert_contains 'OPEN_WEBUI_ADMIN_EMAIL=' profiles/ms-qr1.env.example
+assert_contains 'OPEN_WEBUI_ADMIN_PASSWORD=' profiles/ms-qr1.env.example
+assert_contains 'template_application_enabled' extensions/services/dashboard-api/routers/setup.py
+assert_contains 'qr1_registration_only' extensions/services/dashboard-api/routers/templates.py
+assert_contains 'operator-access.json' scripts/ms-qr1-operator-readiness.py
+assert_contains 'Open WebUI' config/ms-qr1/operator-access.json
 assert_contains 'SDXL_REVISION=c6c10e8716de60c7ef4eed6b89a06f67e772b374' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'SDXL_SHA256=e0d996ee0013e79d9d3561f50fcafb9a17e3ff07b780358e3b66d67932c4d490' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md
 assert_contains 'sha256sum -c -' ../docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md

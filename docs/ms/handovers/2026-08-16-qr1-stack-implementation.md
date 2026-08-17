@@ -18,6 +18,8 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 - Narrow host Ollama HTTP bridge helper: `ods/scripts/ms-qr1-ollama-bridge.sh`.
 - QR1 Ollama HTTP proxy implementation: `ods/scripts/ms-qr1-ollama-http-proxy.py`.
 - QR1 acceptance helper: `ods/scripts/ms-qr1-acceptance.sh`.
+- QR1 operator readiness helper: `ods/scripts/ms-qr1-operator-readiness.sh`.
+- QR1 operator access registry: `ods/config/ms-qr1/operator-access.json`.
 - QR1 helper regression tests: `ods/tests/test-ms-qr1-helpers.sh`.
 - Operator runbook: `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`.
 - Privileged provisioning decision: `docs/ms/decisions/QR1-QUIESCENT-PRIVILEGED-PROVISIONING.md`.
@@ -45,6 +47,9 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 - EVO-X3 hardware qualification of merged `ms/main` at `57f32ac0` then reached the blocking QR1 acceptance gate after HTTP bridge replacement, container default-Host Ollama routing, UFW/listener inspection, full stack health, Hermes post-start refresh, and no host `9119` listener all passed. The first acceptance execution had 13 checks pass and 2 false-positive assumptions: approved host Tailscale Serve tailnet `11434` listeners were mistaken for non-gateway bridge binds, and the documented Hermes proxy `303 Location: /auth/required` unauthenticated redirect was not accepted. Qualification remains pending until the corrected acceptance gate returns zero.
 - EVO-X3 hardware qualification of merged `ms/main` at `f3a5a3ca` confirmed Hermes acceptance passed and only `live QR1 service listeners are loopback and bridge listeners are not wildcard` still failed. Root cause: actual `tailscale serve status` prints approved Serve mappings with tree prefixes (`|-- tcp://...` and `|--> tcp://127.0.0.1:11434`), while the PR #9 fixture used sanitized `tcp://...` / `--> ...` lines. Qualification remains pending until the live-format parser correction is reviewed, merged, and the gate returns zero on EVO-X3.
 - EVO-X3 hardware qualification of merged `ms/main` at `b7ede9f3` is PASS. All corrective PRs are merged. The final live host had the full QR1 stack healthy, active and systemd-valid Ollama bridge, expected gateway/loopback/Tailscale listeners, UFW scoped to Tailscale plus Docker CIDR `172.19.0.0/16` for TCP `11434` and `7710`, `qwen3.8:27b` present in Ollama, prestart check `PRESTART_CHECK_RC=0`, and blocking QR1 acceptance `FINAL_ACCEPTANCE_RC=0` with `All QR1 acceptance checks passed`.
+- Post-qualification operator integration found that QR1 must treat first boot as registration/operator setup only. The generic ODS Full Stack template must not run after QR1 is already selected and qualified, because it can mutate the authoritative Langfuse compose-file state. QR1 uses `MS_QR1_HOST_GATEWAY` as the deployment signal; the first-boot wizard skips template application and the template API returns a QR1 no-op receipt if invoked directly.
+- Open WebUI QR1 keeps `WEBUI_AUTH=true` and `WEBUI_ENABLE_SIGNUP=false`. Fresh installs bootstrap the first admin through Open WebUI's supported headless admin environment variables sourced from `.env`; no password belongs in source, logs or docs. Existing Open WebUI users are not overwritten by restart.
+- Operator readiness is now a separate gate after infrastructure acceptance. Run `scripts/ms-qr1-operator-readiness.sh` for the table report or `scripts/ms-qr1-operator-readiness.sh --json` for machine-readable evidence before starting Phase 2 prompt, workflow and agent testing.
 
 ## Qualification Closeout
 
@@ -81,6 +86,7 @@ sudo EXPECTED_MODEL=<qr1-ollama-model> ENV_FILE="$PWD/.env" scripts/ms-qr1-accep
 bash scripts/validate-env.sh .env
 scripts/ms-qr1-prestart-provision.sh check
 scripts/ms-qr1-prestart-provision.sh poststart-refresh
+scripts/ms-qr1-operator-readiness.sh
 python3 scripts/ms-qr1-ollama-http-proxy.py --self-test
 python3 scripts/audit-extensions.py
 bash tests/test-safe-env.sh

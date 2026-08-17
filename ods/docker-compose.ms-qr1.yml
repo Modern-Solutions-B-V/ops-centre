@@ -24,6 +24,9 @@ services:
     environment:
       WEBUI_AUTH: "true"
       ENABLE_SIGNUP: "${WEBUI_ENABLE_SIGNUP:-false}"
+      WEBUI_ADMIN_EMAIL: "${OPEN_WEBUI_ADMIN_EMAIL:-}"
+      WEBUI_ADMIN_PASSWORD: "${OPEN_WEBUI_ADMIN_PASSWORD:-}"
+      WEBUI_ADMIN_NAME: "${OPEN_WEBUI_ADMIN_NAME:-MS Ops Centre Admin}"
       OPENAI_API_BASE_URL: "http://litellm:4000/v1"
       OPENAI_API_KEY: "${LITELLM_KEY:?LITELLM_KEY must be generated for QR1}"
 
