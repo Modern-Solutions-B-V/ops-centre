@@ -436,10 +436,10 @@ cat > "$tmpdir/tailscale0-addr.txt" <<'EOF'
 10: tailscale0    inet6 fd7a:115c:a1e0::a801:5c2/128 scope global
 EOF
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
-tcp://evox3.tailfc79e6.ts.net:11434 (tailnet only)
-tcp://100.116.5.69:11434
-tcp://[fd7a:115c:a1e0::a801:5c2]:11434
---> tcp://127.0.0.1:11434
+|-- tcp://evox3.tailfc79e6.ts.net:11434 (tailnet only)
+|-- tcp://100.116.5.69:11434
+|-- tcp://[fd7a:115c:a1e0::a801:5c2]:11434
+|--> tcp://127.0.0.1:11434
 EOF
 
 bridge_libexec="$tmpdir/libexec/ms-qr1"
@@ -1129,6 +1129,17 @@ LISTEN 0      4096   172.31.0.1:7710     0.0.0.0:*         users:(("python3",pid
 LISTEN 0      4096   127.0.0.1:4000      0.0.0.0:*         users:(("docker-proxy",pid=14,fd=3))
 EOF
 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
+expected_tail_addrs="$tmpdir/expected-tail-addrs.txt"
+cat > "$expected_tail_addrs" <<'EOF'
+100.116.5.69
+fd7a:115c:a1e0::a801:5c2
+EOF
+"${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; approved_tailscale_serve_11434_addrs' > "$tmpdir/approved-tail-addrs.out"
+if ! diff -u "$expected_tail_addrs" "$tmpdir/approved-tail-addrs.out"; then
+  echo "Tailscale Serve parser should approve only assigned EVO-X3 tailnet IPs from the live tree output" >&2
+  exit 1
+fi
+assert_not_contains 'evox3.tailfc79e6.ts.net' "$tmpdir/approved-tail-addrs.out"
 cat > "$tmpdir/ss-state.txt" <<'EOF'
 State  Recv-Q Send-Q Local Address:Port                   Peer Address:Port Process
 LISTEN 0      4096   127.0.0.1:11434                      0.0.0.0:*         users:(("ollama",pid=10,fd=3))
@@ -1147,8 +1158,8 @@ LISTEN 0      4096   172.20.0.1:11434                     0.0.0.0:*         user
 LISTEN 0      4096   100.116.5.69:11434                   0.0.0.0:*         users:(("tailscaled",pid=15,fd=3))
 EOF
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
-tcp://100.116.5.69:11434
---> tcp://127.0.0.1:11434
+|-- tcp://100.116.5.69:11434
+|--> tcp://127.0.0.1:11434
 EOF
 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
 cat > "$tmpdir/ss-state.txt" <<'EOF'
@@ -1159,8 +1170,8 @@ LISTEN 0      4096   172.20.0.1:11434                     0.0.0.0:*         user
 LISTEN 0      4096   [fd7a:115c:a1e0::a801:5c2]:11434     [::]:*            users:(("tailscaled",pid=16,fd=3))
 EOF
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
-tcp://[fd7a:115c:a1e0::a801:5c2]:11434
---> tcp://127.0.0.1:11434
+|-- tcp://[fd7a:115c:a1e0::a801:5c2]:11434
+|--> tcp://127.0.0.1:11434
 EOF
 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
 cat > "$tmpdir/ss-state.txt" <<'EOF'
@@ -1171,10 +1182,12 @@ LISTEN 0      4096   172.20.0.1:11434                     0.0.0.0:*         user
 LISTEN 0      4096   100.116.5.69:11434                   0.0.0.0:*         users:(("tailscaled",pid=15,fd=3))
 EOF
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
-https://evox3.tailfc79e6.ts.net:443
---> http://127.0.0.1:3001
-tcp://100.116.5.69:11434
---> tcp://127.0.0.1:11434
+|-- https://evox3.tailfc79e6.ts.net:443
+|--> http://127.0.0.1:3001
+|-- tcp://evox3.tailfc79e6.ts.net:11434 (tailnet only)
+|-- tcp://100.116.5.69:11434
+|-- tcp://[fd7a:115c:a1e0::a801:5c2]:11434
+|--> tcp://127.0.0.1:11434
 EOF
 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
@@ -1187,8 +1200,8 @@ if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_l
 fi
 assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-no-serve.out"
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
-https://evox3.tailfc79e6.ts.net:443
---> http://127.0.0.1:3001
+|-- https://evox3.tailfc79e6.ts.net:443
+|--> http://127.0.0.1:3001
 EOF
 if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-tail-https-only.out" 2> "$tmpdir/ss-tail-https-only.err"; then
   echo "listener acceptance should not exempt Ollama listeners for HTTPS-only Tailscale Serve output" >&2
@@ -1276,10 +1289,10 @@ if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_l
 fi
 assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-malformed-mixed.out"
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
-tcp://evox3.tailfc79e6.ts.net:11434 (tailnet only)
-tcp://100.116.5.69:11434
-tcp://[fd7a:115c:a1e0::a801:5c2]:11434
---> tcp://127.0.0.1:11434
+|-- tcp://evox3.tailfc79e6.ts.net:11434 (tailnet only)
+|-- tcp://100.116.5.69:11434
+|-- tcp://[fd7a:115c:a1e0::a801:5c2]:11434
+|--> tcp://127.0.0.1:11434
 EOF
 cat > "$tmpdir/ss-state.txt" <<'EOF'
 State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process

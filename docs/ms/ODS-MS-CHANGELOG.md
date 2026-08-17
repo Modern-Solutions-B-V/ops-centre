@@ -8,6 +8,83 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-17 — Match live Tailscale Serve tree output in QR1 acceptance
+
+### Change ID
+`MSODS-0014`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`fix/qr1-tailscale-serve-tree-format` / PR pending
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`EXTEND`
+
+### Files changed
+- `ods/scripts/ms-qr1-acceptance.sh`
+- `ods/tests/test-ms-qr1-helpers.sh`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Live EVO-X3 qualification of merged `ms/main` commit `f3a5a3ca` reached the
+blocking QR1 acceptance gate with all checks passing except
+`live QR1 service listeners are loopback and bridge listeners are not wildcard`.
+The remaining failure was caused by a fixture drift in the Tailscale Serve
+status parser: tests used sanitized lines such as `tcp://...` and
+`--> tcp://...`, while the actual Ubuntu/Tailscale CLI output on EVO-X3 uses
+tree-display prefixes:
+
+```text
+|-- tcp://evox3.tailfc79e6.ts.net:11434 (tailnet only)
+|-- tcp://100.116.5.69:11434
+|-- tcp://[fd7a:115c:a1e0::a801:5c2]:11434
+|--> tcp://127.0.0.1:11434
+```
+
+### Behavior before
+`approved_tailscale_serve_11434_addrs` stripped whitespace but fed the literal
+`|--` and `|-->` prefixes into the block parser, so the real approved
+Tailscale Serve mapping failed closed and the listener gate still classified
+the tailnet `11434` listeners as non-gateway bridge binds.
+
+### Behavior after
+The parser normalizes only the documented Tailscale tree prefixes `|-- ` for
+source lines and `|--> ` for target lines before applying the existing block
+parser invariants. The exact TCP port `11434`, exact target
+`tcp://127.0.0.1:11434`, `tailscale0` address-membership requirement, LAN and
+wildcard rejection, and block association rules are unchanged.
+
+### Security / privacy impact
+Neutral. This is an acceptance-format correction only. It does not change
+Tailscale Serve state, Tailscale configuration, UFW, the Ollama bridge, Hermes,
+Caddy, Compose, persistent-state lifecycle, or runtime architecture.
+
+### Qualification status
+Local/static validation passed for this corrective branch. EVO-X3 hardware
+qualification remains **PENDING** until the corrected acceptance gate is rerun
+on the host and returns zero.
+
+### Validation performed
+- `bash ods/tests/test-ms-qr1-helpers.sh`
+- `for f in ods/scripts/ms-qr1-acceptance.sh ods/tests/test-ms-qr1-helpers.sh; do bash -n "$f"; done`
+- `(cd ods && PYTHONPYCACHEPREFIX=/tmp/ms-qr1-lint-pycache make lint)`
+- `(cd ods && MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config >/tmp/qr1-compose.rendered.yml)`
+- `(cd ods && python3 tests/contracts/test-network-exposure-contracts.py)`
+- `git diff --check`
+- `rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" docs/ms/ODS-MS-CHANGELOG.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md ods/scripts/ms-qr1-acceptance.sh ods/tests/test-ms-qr1-helpers.sh`
+
+### Rollback
+Repository rollback: revert the MSODS-0014 commit. Host rollback is not
+required because this change only adjusts acceptance parsing and tests.
+
+---
+
 ## 2026-08-17 — Correct QR1 acceptance false positives for Tailscale Serve and Hermes auth redirect
 
 ### Change ID
