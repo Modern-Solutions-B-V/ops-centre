@@ -87,12 +87,20 @@ The readiness verdict is intentionally conservative:
 - normal functional probes require the capability-specific expected status,
   usually HTTP `2xx`; arbitrary `4xx` is not globally successful;
 - Hermes keeps only the reviewed unauthenticated denial contract, including
-  `401`/`403`/`404` and exact `303 Location: /auth/required`;
+  `401`/`403`/`404` and exact `303 Location: /auth/required`, with redirects
+  disabled so the original proxy response is evaluated and no auth headers can
+  be forwarded to redirected locations;
 - loopback probes use a no-proxy urllib opener so `HTTP_PROXY` and
   `HTTPS_PROXY` cannot receive local readiness traffic or auth headers;
 - required probe credentials such as Qdrant, Privacy Shield, Token Spy,
-  LiteLLM and Dashboard API keys must be configured, but their values are never
-  printed;
+  LiteLLM, Dashboard API keys and `ODS_SESSION_SECRET` must be configured, but
+  their values are never printed;
+- the Ollama capability verifies native loopback Ollama plus the active QR1
+  gateway bridge listener instead of treating `ms-qr1-ollama-bridge` as
+  automatically ready;
+- canonical Dashboard/Open WebUI URLs are marked remotely reachable only when
+  the matching Tailscale Serve mapping is present and targets the expected
+  loopback service;
 - Open WebUI readiness requires a read-only inspection proving at least one
   persisted `role='admin'` user in `data/open-webui/webui.db`; configured
   bootstrap env values alone are not treated as completed bootstrap.
@@ -109,6 +117,13 @@ change UFW, change the Ollama bridge, or weaken quiescent provisioning. It
 prevents generic onboarding from changing QR1 stack composition after
 qualification and gives operators one non-destructive readiness gate before
 Phase 2 prompt/workflow/agent testing.
+
+Deferred hardening not included in PR #12: WAL-aware Open WebUI readiness is
+tracked as `MSODS-QR2-0004` because the pinned QR1 Open WebUI does not enable
+`DATABASE_ENABLE_SQLITE_WAL` and the current immutable inspection fails closed
+if that assumption changes. DNS trailing-hyphen schema hardening is tracked as
+`MSODS-QR2-0005` because the deployed EVO-X3 Tailscale hostname is valid and
+this edge case is not a QR1 viability blocker.
 
 ### Upgrade impact
 On EVO-X3 after merge:
@@ -147,7 +162,7 @@ state.
 - `(cd ods && MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config >/tmp/qr1-operator-compose.rendered.yml)`
 - `python3 ods/tests/contracts/test-network-exposure-contracts.py`
 - `git diff --check`
-- `if rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" docs/ms/ODS-MS-CHANGELOG.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md docs/ms/backlog/QR2-BACKLOG.md ods/docker-compose.ms-qr1.yml ods/profiles/ms-qr1.env.example ods/.env.schema.json ods/config/ms-qr1/operator-access.json ods/scripts/ms-qr1-operator-readiness.py ods/scripts/ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-helpers.sh ods/extensions/services/dashboard-api/config.py ods/extensions/services/dashboard-api/routers/setup.py ods/extensions/services/dashboard-api/routers/templates.py ods/extensions/services/dashboard-api/tests/test_setup.py ods/extensions/services/dashboard-api/tests/test_templates.py ods/extensions/services/dashboard/src/App.jsx ods/extensions/services/dashboard/src/hooks/useFirstRun.js ods/extensions/services/dashboard/src/pages/FirstBoot.jsx ods/extensions/services/dashboard/src/pages/FirstBoot.test.jsx | grep -v GENERATE_ME | grep -v "_PORT=" | grep -v "OPEN_WEBUI_ADMIN_PASSWORD" | grep -v "LANGFUSE_INIT_USER_PASSWORD" | grep -v "MS_QR1_READINESS_STATUS_" | grep -v "printf '%s%s%s" | grep -v 'QDRANT_" "API_KEY'; then exit 1; fi`
+- `if rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" docs/ms/ODS-MS-CHANGELOG.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md docs/ms/backlog/QR2-BACKLOG.md ods/docker-compose.ms-qr1.yml ods/profiles/ms-qr1.env.example ods/.env.schema.json ods/config/ms-qr1/operator-access.json ods/scripts/ms-qr1-operator-readiness.py ods/scripts/ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-helpers.sh ods/extensions/services/dashboard-api/config.py ods/extensions/services/dashboard-api/routers/setup.py ods/extensions/services/dashboard-api/routers/templates.py ods/extensions/services/dashboard-api/tests/test_setup.py ods/extensions/services/dashboard-api/tests/test_templates.py ods/extensions/services/dashboard/src/App.jsx ods/extensions/services/dashboard/src/hooks/useFirstRun.js ods/extensions/services/dashboard/src/pages/FirstBoot.jsx ods/extensions/services/dashboard/src/pages/FirstBoot.test.jsx | grep -v GENERATE_ME | grep -v "_PORT=" | grep -v "OPEN_WEBUI_ADMIN_PASSWORD" | grep -v "LANGFUSE_INIT_USER_PASSWORD" | grep -v "MS_QR1_READINESS_STATUS_" | grep -v "printf '%s%s%s" | grep -v 'QDRANT_" "API_KEY' | grep -v 'ODS_SESSION_" "SECRET'; then exit 1; fi`
 
 ### Rollback
 Repository rollback: revert this commit. Host rollback: remove the QR1 Open

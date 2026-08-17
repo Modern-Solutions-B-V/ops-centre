@@ -625,7 +625,11 @@ scripts/ms-qr1-operator-readiness.sh --json > /tmp/qr1-operator-readiness.json
 Expected: the report classifies every scoped QR1 capability as
 operator-facing or internal-platform, shows container health, a shallow
 non-destructive probe, auth/bootstrap readiness, dependency state, and the
-canonical operator URL where a route is approved.
+canonical operator URL where a route is approved. The readiness gate is
+read-only but it verifies live contracts that can make operator access fail:
+Dashboard/Open WebUI canonical URLs require matching Tailscale Serve mappings,
+Hermes auth redirects are observed without following them, and the Ollama
+capability requires both native loopback Ollama and the QR1 bridge listener.
 
 Approved QR1 operator launch URLs:
 

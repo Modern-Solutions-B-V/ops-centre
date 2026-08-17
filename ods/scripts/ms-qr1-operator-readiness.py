@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +23,14 @@ REGISTRY = ROOT / "config" / "ms-qr1" / "operator-access.json"
 ENV_FILE = Path(os.environ.get("ENV_FILE", ROOT / ".env"))
 DATA_DIR = Path(os.environ.get("MS_QR1_READINESS_DATA_DIR", ROOT / "data"))
 TIMEOUT = float(os.environ.get("MS_QR1_READINESS_TIMEOUT", "5"))
-NO_PROXY_OPENER = build_opener(ProxyHandler({}))
+class NoRedirectHandler(HTTPRedirectHandler):
+    """Observe QR1 auth redirects directly; readiness must not follow them."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+NO_PROXY_OPENER = build_opener(ProxyHandler({}), NoRedirectHandler)
 READY_HEALTH = {"healthy", "running_without_healthcheck", "external"}
 SAFE_HTTP_2XX = tuple(range(200, 300))
 HERMES_DENIAL_STATUSES = (401, 403, 404)
@@ -74,7 +81,7 @@ CAPABILITIES = (
         "unauthenticated access denied by reviewed Hermes proxy contract",
         ("dashboard-api", "litellm", "searxng"),
         expected_statuses=HERMES_DENIAL_STATUSES,
-        required_env=("DASHBOARD_API_KEY", "LITELLM_KEY"),
+        required_env=("DASHBOARD_API_KEY", "LITELLM_KEY", "ODS_SESSION_SECRET"),
     ),
     Capability(
         "n8n Workflows",
@@ -123,7 +130,7 @@ CAPABILITIES = (
         ("ms-qr1-ollama-bridge",),
         "internal-platform",
         "http://127.0.0.1:11434/api/tags",
-        "loopback Ollama plus gateway-only HTTP bridge",
+        "loopback Ollama plus active gateway-only QR1 HTTP bridge",
     ),
     Capability(
         "Model Router",
@@ -197,7 +204,7 @@ def read_env(path: Path = ENV_FILE) -> dict[str, str]:
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip().strip("\"'")
     prefixes = (
-        "MS_QR1_", "OPEN_WEBUI_", "WEBUI_", "LITELLM_", "QDRANT_",
+        "MS_QR1_", "OPEN_WEBUI_", "WEBUI_", "LITELLM_", "QDRANT_", "ODS_",
         "SHIELD_", "TOKEN_SPY_", "DASHBOARD_", "N8N_", "LANGFUSE_",
         "APE_", "COMFYUI_", "PERPLEXICA_", "SEARXNG_", "WHISPER_", "TTS_",
     )
@@ -241,6 +248,16 @@ def load_operator_urls(env: dict[str, str]) -> dict[str, str]:
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, check=False)
+
+
+def split_host_port(value: str) -> tuple[str, str]:
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.netloc:
+        return "", ""
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return parsed.hostname or "", str(port)
 
 
 def normalize_health(item: dict[str, Any]) -> str:
@@ -306,6 +323,95 @@ def fixture_status_for(capability: Capability) -> Optional[int]:
     return int(value)
 
 
+def headers_by_lower_name(headers: Any) -> dict[str, list[str]]:
+    values: dict[str, list[str]] = {}
+    for key in headers.keys():
+        values.setdefault(str(key).lower(), []).extend(headers.get_all(key) or [])
+    return values
+
+
+def listener_addrs_for_port(snapshot: str, port: str) -> set[str]:
+    found: set[str] = set()
+    for line in snapshot.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[0] == "State":
+            continue
+        local = fields[3]
+        if local.startswith("["):
+            match = re.match(r"^\[([^\]]+)\]:(\d+)$", local)
+            if match and match.group(2) == port:
+                found.add(match.group(1))
+            continue
+        if ":" not in local:
+            continue
+        addr, actual_port = local.rsplit(":", 1)
+        if actual_port == port:
+            found.add(addr)
+    return found
+
+
+def command_or_fixture(name: str, cmd: list[str]) -> tuple[bool, str]:
+    value = os.environ.get(name)
+    if value is not None:
+        path = Path(value)
+        if path.exists():
+            return True, path.read_text(encoding="utf-8")
+        return True, value
+    result = run(cmd)
+    return result.returncode == 0, result.stdout
+
+
+def ollama_bridge_probe(url: str) -> ProbeResult:
+    fixture = os.environ.get("MS_QR1_READINESS_OLLAMA_BRIDGE_STATE")
+    if fixture:
+        if fixture == "ready":
+            return ProbeResult(True, "native Ollama and QR1 bridge listener present")
+        return ProbeResult(False, f"QR1 Ollama bridge not ready: {fixture}")
+
+    native = http_probe_basic(url)
+    if not native.ok:
+        return native
+
+    active = run(["systemctl", "is-active", "ms-qr1-ollama-bridge.service"])
+    if active.returncode != 0 or active.stdout.strip() != "active":
+        return ProbeResult(False, "ms-qr1-ollama-bridge.service is not active")
+
+    expected_ok, expected_out = command_or_fixture(
+        "MS_QR1_READINESS_BRIDGE_EXPECTED_LISTENERS",
+        ["bash", "scripts/ms-qr1-ollama-bridge.sh", "expected-listeners"],
+    )
+    if not expected_ok:
+        return ProbeResult(False, "cannot determine expected QR1 bridge listener(s)")
+    expected = set(filter(None, (line.strip() for line in expected_out.splitlines())))
+    if not expected:
+        return ProbeResult(False, "no expected QR1 bridge listener(s)")
+
+    ss_ok, ss_out = command_or_fixture("MS_QR1_READINESS_SS", ["ss", "-tlnp"])
+    if not ss_ok:
+        return ProbeResult(False, "cannot capture listener snapshot with ss")
+    addrs = listener_addrs_for_port(ss_out, "11434")
+    if "127.0.0.1" not in addrs:
+        return ProbeResult(False, "native loopback Ollama listener is absent")
+    missing = sorted(expected - addrs)
+    if missing:
+        return ProbeResult(False, f"missing QR1 bridge listener(s): {', '.join(missing)}")
+    return ProbeResult(True, "native Ollama and QR1 bridge listener present")
+
+
+def http_probe_basic(url: str, headers: Optional[dict[str, str]] = None) -> ProbeResult:
+    request = Request(url, headers=headers or {})
+    try:
+        with NO_PROXY_OPENER.open(request, timeout=TIMEOUT) as response:
+            code = response.getcode()
+            response_headers = headers_by_lower_name(response.headers)
+    except HTTPError as exc:
+        code = exc.code
+        response_headers = headers_by_lower_name(exc.headers)
+    except (OSError, URLError) as exc:
+        return ProbeResult(False, f"probe failed: {exc}")
+    return ProbeResult(True, f"HTTP {code}", code, response_headers)
+
+
 def http_probe(url: str, env: dict[str, str], capability: Capability) -> ProbeResult:
     if not url:
         if capability.allow_empty_probe:
@@ -317,27 +423,19 @@ def http_probe(url: str, env: dict[str, str], capability: Capability) -> ProbeRe
         ok = fixture_status in capability.expected_statuses
         return ProbeResult(ok, f"HTTP {fixture_status}", fixture_status)
 
+    if capability.capability == "Ollama Host Route":
+        return ollama_bridge_probe(url)
+
     headers = {}
     if capability.probe_auth == "qdrant":
         token = env.get("QDRANT_API_KEY", "")
         if token:
             headers["api-key"] = token
-    request = Request(url, headers=headers)
-    try:
-        with NO_PROXY_OPENER.open(request, timeout=TIMEOUT) as response:
-            code = response.getcode()
-            headers_by_name = {
-                key.lower(): response.headers.get_all(key) or []
-                for key in response.headers.keys()
-            }
-    except HTTPError as exc:
-        code = exc.code
-        headers_by_name = {
-            key.lower(): exc.headers.get_all(key) or []
-            for key in exc.headers.keys()
-        }
-    except (OSError, URLError) as exc:
-        return ProbeResult(False, f"probe failed: {exc}")
+    basic = http_probe_basic(url, headers)
+    if not basic.ok:
+        return basic
+    code = basic.status or 0
+    headers_by_name = basic.headers
     if capability.capability == "Hermes Operator Surface" and code == 303:
         locations = headers_by_name.get("location", [])
         ok = len(locations) == 1 and locations[0].strip() == "/auth/required"
@@ -406,6 +504,96 @@ def auth_state(capability: Capability, env: dict[str, str]) -> tuple[bool, str]:
     return config_ok, config_reason
 
 
+def normalize_serve_line(raw_line: str) -> str:
+    line = raw_line.strip()
+    if line.startswith("|--> "):
+        return "--> " + line[5:]
+    if line.startswith("|-- "):
+        return line[4:]
+    return line
+
+
+def tailscale_serve_status() -> tuple[bool, str]:
+    value = os.environ.get("MS_QR1_READINESS_TAILSCALE_SERVE_STATUS")
+    if value is not None:
+        path = Path(value)
+        if path.exists():
+            return True, path.read_text(encoding="utf-8")
+        return True, value
+    result = run(["tailscale", "serve", "status"])
+    return result.returncode == 0, result.stdout
+
+
+def approved_serve_mappings() -> dict[tuple[str, str, str], str]:
+    ok, status = tailscale_serve_status()
+    if not ok:
+        return {}
+    source_re = re.compile(r"^(tcp|https?)://(?:\[([^\]]+)\]|([^:\s]+)):(\d+)(?:\s+\(tailnet only\))?$")
+    target_re = re.compile(r"^-->\s*((?:tcp|https?)://[^\s]+)$")
+    mappings: dict[tuple[str, str, str], str] = {}
+    pending: list[tuple[str, str, str]] = []
+    pending_family: Optional[tuple[str, str]] = None
+
+    for raw_line in status.splitlines():
+        line = normalize_serve_line(raw_line)
+        if not line:
+            continue
+        target_match = target_re.match(line)
+        if target_match:
+            if not pending:
+                return {}
+            target = target_match.group(1)
+            for scheme, host, port in pending:
+                key = (scheme, host, port)
+                if key in mappings:
+                    return {}
+                mappings[key] = target
+            pending = []
+            pending_family = None
+            continue
+
+        source_match = source_re.match(line)
+        if not source_match:
+            return {}
+        scheme = source_match.group(1)
+        host = source_match.group(2) or source_match.group(3)
+        port = source_match.group(4)
+        family = (scheme, port)
+        if pending_family is None:
+            pending_family = family
+        elif pending_family != family:
+            return {}
+        pending.append((scheme, host, port))
+
+    if pending:
+        return {}
+    return mappings
+
+
+def operator_route_state(capability: Capability, canonical_url: str, local_url: str, env: dict[str, str]) -> tuple[str, bool, str]:
+    if not canonical_url:
+        if capability.role == "operator-facing":
+            return "loopback-only", True, "no QR1 remote route approved"
+        return "internal-only", True, "internal capability"
+
+    if capability.capability not in {"ODS Dashboard / Control Centre", "Open WebUI"}:
+        return "no", False, "canonical URL configured for unapproved QR1 route"
+
+    host, port = split_host_port(canonical_url)
+    expected_host = env.get("MS_QR1_TAILSCALE_HOSTNAME", "")
+    if not host or host != expected_host:
+        return "no", False, "canonical URL does not match MS_QR1_TAILSCALE_HOSTNAME"
+
+    parsed_local = urlparse(local_url)
+    if parsed_local.hostname != "127.0.0.1" or parsed_local.port is None:
+        return "no", False, "local operator target is not loopback"
+    expected_target = f"http://127.0.0.1:{parsed_local.port}"
+    actual_target = approved_serve_mappings().get(("https", host, port))
+    if actual_target == expected_target:
+        return "yes", True, "approved Tailscale Serve mapping present"
+    return "no", False, f"missing approved Tailscale Serve mapping to {expected_target}"
+
+
 def service_ready(value: str) -> bool:
     return value in READY_HEALTH
 
@@ -416,13 +604,14 @@ def evaluate_rows() -> list[dict[str, Any]]:
     service_health = compose_ps()
     rows: list[dict[str, Any]] = []
     for cap in CAPABILITIES:
-        health_values = [
-            service_health.get(service, "external" if service == "ms-qr1-ollama-bridge" else "unknown")
-            for service in cap.services
-        ]
+        health_values = [service_health.get(service, "unknown") for service in cap.services]
+        if cap.capability == "Ollama Host Route":
+            health_values = ["checked-by-readiness"]
         container_ok = all(service_ready(value) for value in health_values)
         local_url = expand(os.environ.get(f"MS_QR1_READINESS_URL_{cap.key}", cap.local_url), env)
         probe = http_probe(local_url, env, cap)
+        if cap.capability == "Ollama Host Route":
+            container_ok = probe.ok
         auth_ok, auth_reason = auth_state(cap, env)
         deps = {
             dep: service_health.get(dep, "external" if dep == "ollama-host" else "unknown")
@@ -430,8 +619,8 @@ def evaluate_rows() -> list[dict[str, Any]]:
         }
         deps_ok = all(service_ready(value) for value in deps.values())
         canonical_url = operator_urls.get(cap.capability, "")
-        reachable = "yes" if canonical_url else ("loopback-only" if cap.role == "operator-facing" else "internal-only")
-        ok = container_ok and probe.ok and auth_ok and deps_ok
+        reachable, route_ok, route_reason = operator_route_state(cap, canonical_url, local_url, env)
+        ok = container_ok and probe.ok and auth_ok and deps_ok and route_ok
         reason_parts = []
         if not container_ok:
             reason_parts.append(f"container health={health_values}")
@@ -441,6 +630,8 @@ def evaluate_rows() -> list[dict[str, Any]]:
             reason_parts.append(auth_reason)
         if not deps_ok:
             reason_parts.append(f"dependencies={deps}")
+        if not route_ok:
+            reason_parts.append(route_reason)
         rows.append({
             "capability": cap.capability,
             "services": ",".join(cap.services),

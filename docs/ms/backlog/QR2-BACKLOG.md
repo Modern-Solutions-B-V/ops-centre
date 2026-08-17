@@ -52,3 +52,35 @@ Acceptance:
 - No default test path uses paid external model APIs.
 - External service/tool credentials are injected through approved secret
   handling only.
+
+## MSODS-QR2-0004 — Open WebUI SQLite WAL Readiness Hardening
+
+Classification: HARDENING.
+
+QR1/pinned Open WebUI does not enable `DATABASE_ENABLE_SQLITE_WAL`; the QR1
+readiness check uses immutable read-only SQLite inspection and fails closed if
+that assumption changes. If WAL mode is enabled or observed live, add a
+WAL-aware, still read-only admin-state proof before treating Open WebUI
+bootstrap as ready.
+
+Acceptance:
+
+- Readiness does not create, modify or require chown/chmod of SQLite sidecar
+  files.
+- WAL-enabled Open WebUI admin state can be proven without mutating
+  `data/open-webui`.
+- Missing or unreadable admin state remains NOT READY.
+
+## MSODS-QR2-0005 — DNS Hostname Schema Hardening
+
+Classification: HARDENING.
+
+The current EVO-X3 Tailscale hostname is valid and accepted by the QR1 schema.
+Future schema hardening should reject edge-case DNS labels such as trailing
+hyphens without changing the QR1 operator route architecture.
+
+Acceptance:
+
+- `MS_QR1_TAILSCALE_HOSTNAME` rejects malformed DNS label edge cases.
+- Existing valid Tailscale hostnames continue to validate.
+- No hard-coded hostnames are introduced.

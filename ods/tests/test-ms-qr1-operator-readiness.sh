@@ -61,6 +61,7 @@ ENV
   printf '%s%s%s\n' 'TOKEN_SPY_' 'API_KEY' '=fixture-only' >> "$file"
   printf '%s%s%s\n' 'DASHBOARD_' 'API_KEY' '=fixture-only' >> "$file"
   printf '%s%s%s\n' 'QDRANT_' 'API_KEY' '=fixture-only' >> "$file"
+  printf '%s%s%s\n' 'ODS_SESSION_' 'SECRET' '=fixture-only' >> "$file"
 }
 
 make_webui_db() {
@@ -88,7 +89,6 @@ MS_QR1_READINESS_STATUS_LANGFUSE_OBSERVABILITY=200
 MS_QR1_READINESS_STATUS_PERPLEXICA_RESEARCH=200
 MS_QR1_READINESS_STATUS_COMFYUI_IMAGE_GENERATION=200
 MS_QR1_READINESS_STATUS_LITELLM_GATEWAY=200
-MS_QR1_READINESS_STATUS_OLLAMA_HOST_ROUTE=200
 MS_QR1_READINESS_STATUS_QDRANT_VECTOR_STORE=200
 MS_QR1_READINESS_STATUS_TEI_EMBEDDINGS=200
 MS_QR1_READINESS_STATUS_SEARXNG_SEARCH=200
@@ -134,9 +134,16 @@ PY
 ps_ok="$tmpdir/ps-ok.jsonl"
 env_ok="$tmpdir/qr1.env"
 data_ok="$tmpdir/data-ok"
+serve_ok="$tmpdir/tailscale-serve-ok.txt"
 write_ps "$ps_ok"
 write_env "$env_ok"
 make_webui_db "$data_ok" admin
+cat > "$serve_ok" <<'SERVE'
+|-- https://qr1-alt.tailtest.ts.net:443
+|--> http://127.0.0.1:3001
+|-- https://qr1-alt.tailtest.ts.net:8443
+|--> http://127.0.0.1:3000
+SERVE
 
 env_bad_hostname="$tmpdir/bad-hostname.env"
 cp "$env_ok" "$env_bad_hostname"
@@ -156,6 +163,8 @@ set -a
 # shellcheck disable=SC1090
 source "$status_file"
 set +a
+export MS_QR1_READINESS_TAILSCALE_SERVE_STATUS="$serve_ok"
+export MS_QR1_READINESS_OLLAMA_BRIDGE_STATE=ready
 run_json "$ps_ok" "$env_ok" "$data_ok" > "$tmpdir/pass.json"
 assert_cap "$tmpdir/pass.json" "Open WebUI" PASS
 assert_cap "$tmpdir/pass.json" "n8n Workflows" PASS
@@ -170,6 +179,33 @@ assert rows["Hermes Operator Surface"]["canonical_operator_url"] == ""
 assert rows["Hermes Operator Surface"]["operator_reachable"] == "loopback-only"
 assert "fixture-only" not in json.dumps(data)
 PY
+
+serve_wrong="$tmpdir/tailscale-serve-wrong.txt"
+cat > "$serve_wrong" <<'SERVE'
+|-- https://qr1-alt.tailtest.ts.net:443
+|--> http://127.0.0.1:3999
+|-- https://qr1-alt.tailtest.ts.net:8443
+|--> http://127.0.0.1:3000
+SERVE
+if run_json "$ps_ok" "$env_ok" "$data_ok" MS_QR1_READINESS_TAILSCALE_SERVE_STATUS="$serve_wrong" > "$tmpdir/wrong-route-map.json"; then
+  echo "wrong Dashboard Tailscale Serve mapping should fail readiness" >&2
+  exit 1
+fi
+assert_cap "$tmpdir/wrong-route-map.json" "ODS Dashboard / Control Centre" FAIL "missing approved Tailscale Serve mapping"
+
+serve_missing="$tmpdir/tailscale-serve-missing.txt"
+: > "$serve_missing"
+if run_json "$ps_ok" "$env_ok" "$data_ok" MS_QR1_READINESS_TAILSCALE_SERVE_STATUS="$serve_missing" > "$tmpdir/missing-route-map.json"; then
+  echo "missing operator Tailscale Serve mappings should fail readiness" >&2
+  exit 1
+fi
+assert_cap "$tmpdir/missing-route-map.json" "Open WebUI" FAIL "missing approved Tailscale Serve mapping"
+
+if run_json "$ps_ok" "$env_ok" "$data_ok" MS_QR1_READINESS_OLLAMA_BRIDGE_STATE=native-only > "$tmpdir/ollama-bridge-stopped.json"; then
+  echo "stopped QR1 Ollama bridge should fail readiness" >&2
+  exit 1
+fi
+assert_cap "$tmpdir/ollama-bridge-stopped.json" "Ollama Host Route" FAIL "native-only"
 
 if ! env MS_QR1_READINESS_COMPOSE_PS="$ps_ok" ENV_FILE="$env_ok" MS_QR1_READINESS_DATA_DIR="$data_ok" "$PYTHON_BIN" scripts/ms-qr1-operator-readiness.py > "$tmpdir/pass.table"; then
   echo "table mode should pass when JSON mode passes" >&2
@@ -219,6 +255,55 @@ assert_cap "$tmpdir/auth-blocked.json" "Privacy Shield" FAIL "HTTP 403"
 
 run_json "$ps_ok" "$env_ok" "$data_ok" MS_QR1_READINESS_STATUS_HERMES_OPERATOR_SURFACE=403 > "$tmpdir/hermes-403.json"
 assert_cap "$tmpdir/hermes-403.json" "Hermes Operator Surface" PASS
+
+env_missing_session="$tmpdir/missing-session.env"
+write_env "$env_missing_session"
+awk -F= '($1 != "ODS_SESSION_" "SECRET") { print }' "$env_missing_session" > "$tmpdir/missing-session.tmp"
+mv "$tmpdir/missing-session.tmp" "$env_missing_session"
+if run_json "$ps_ok" "$env_missing_session" "$data_ok" > "$tmpdir/missing-session.json"; then
+  echo "missing ODS session secret should fail Hermes readiness" >&2
+  exit 1
+fi
+assert_cap "$tmpdir/missing-session.json" "Hermes Operator Surface" FAIL "ODS_SESSION_SECRET"
+
+"$PYTHON_BIN" - "$env_ok" <<'PY'
+import email.message
+import importlib.util
+import os
+import pathlib
+import sys
+from urllib.error import HTTPError
+
+os.environ.pop("MS_QR1_READINESS_STATUS_HERMES_OPERATOR_SURFACE", None)
+spec = importlib.util.spec_from_file_location(
+    "readiness_redirect", pathlib.Path("scripts/ms-qr1-operator-readiness.py")
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+hermes = next(cap for cap in module.CAPABILITIES if cap.capability == "Hermes Operator Surface")
+env = module.read_env(pathlib.Path(sys.argv[1]))
+
+class RedirectingOpener:
+    def __init__(self, location):
+        self.location = location
+        self.seen_headers = None
+    def open(self, request, timeout):
+        self.seen_headers = dict(request.header_items())
+        msg = email.message.Message()
+        msg.add_header("Location", self.location)
+        raise HTTPError(request.full_url, 303, "See Other", msg, None)
+
+opener = RedirectingOpener("/auth/required")
+module.NO_PROXY_OPENER = opener
+ok = module.http_probe("http://127.0.0.1:9120/api/pty", env, hermes)
+assert ok.ok, ok
+assert opener.seen_headers == {}, opener.seen_headers
+
+module.NO_PROXY_OPENER = RedirectingOpener("https://example.test/auth/required")
+bad = module.http_probe("http://127.0.0.1:9120/api/pty", env, hermes)
+assert not bad.ok, bad
+PY
 
 env_missing="$tmpdir/missing.env"
 write_env "$env_missing"
