@@ -89,6 +89,14 @@ def normalize_llm_contract(value: Any) -> dict[str, Any] | None:
 ODS_MODE_EFFECTIVE = normalize_ods_mode(os.environ.get("ODS_MODE"))
 
 
+def is_ms_qr1_deployment() -> bool:
+    """Return true when the running install carries the QR1 deployment signal."""
+    found, value = _find_env_file_value("MS_QR1_HOST_GATEWAY")
+    candidate = value if found else os.environ.get("MS_QR1_HOST_GATEWAY", "")
+    candidate = str(candidate or "").strip()
+    return bool(candidate and not candidate.startswith("GENERATE_ME"))
+
+
 def _find_env_file_value(key: str) -> tuple[bool, str]:
     """Return the last persisted value and distinguish missing from empty."""
     env_path = Path(INSTALL_DIR) / ".env"

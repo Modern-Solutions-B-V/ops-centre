@@ -52,7 +52,7 @@ function App() {
   // was per-browser and gave the wrong answer on re-imaged devices or fresh
   // browsers. The hook returns firstRun=false while it's loading or if the
   // API call fails, so the normal app shell is the safe default.
-  const { firstRun, refresh: refreshFirstRun } = useFirstRun()
+  const { firstRun, setupStatus, refresh: refreshFirstRun } = useFirstRun()
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     return getStorageValue(globalThis.localStorage, 'ods-sidebar-collapsed') === 'true'
   })
@@ -101,7 +101,7 @@ function App() {
             <div className="font-mono text-sm text-theme-accent tracking-widest animate-pulse">ODS</div>
           </div>
         }>
-          <FirstBoot onComplete={dismissFirstRun} />
+          <FirstBoot onComplete={dismissFirstRun} setupStatus={setupStatus} />
         </Suspense>
       </div>
     )

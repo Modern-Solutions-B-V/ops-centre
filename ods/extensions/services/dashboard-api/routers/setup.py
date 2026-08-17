@@ -13,7 +13,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from config import SERVICES, PERSONAS, SETUP_CONFIG_DIR, INSTALL_DIR, read_live_env_value
+from config import (
+    SERVICES, PERSONAS, SETUP_CONFIG_DIR, INSTALL_DIR, is_ms_qr1_deployment,
+    read_live_env_value,
+)
 from host_agent_client import (
     AgentHTTPError,
     AgentProtocolError,
@@ -65,7 +68,15 @@ async def setup_status(api_key: str = Depends(verify_api_key)):
         except (FileNotFoundError, PermissionError, json.JSONDecodeError):
             logger.debug("Failed to read persona.json for setup status")
 
-    return {"first_run": first_run, "step": step, "persona": persona, "personas_available": list(PERSONAS.keys())}
+    qr1 = is_ms_qr1_deployment()
+    return {
+        "first_run": first_run,
+        "step": step,
+        "persona": persona,
+        "personas_available": list(PERSONAS.keys()),
+        "deployment_mode": "ms-qr1" if qr1 else "generic",
+        "template_application_enabled": not qr1,
+    }
 
 
 @router.post("/api/setup/persona")

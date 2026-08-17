@@ -281,6 +281,39 @@ async def test_template_apply_additive(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_template_apply_qr1_is_registration_only_noop():
+    """QR1 first boot must not mutate the already qualified stack composition."""
+    mock_templates = [{
+        "id": "onboarding-full-stack",
+        "name": "Full",
+        "services": ["langfuse", "n8n", "hermes"],
+    }]
+    with (
+        patch("routers.templates.TEMPLATES", mock_templates),
+        patch("routers.templates.is_ms_qr1_deployment", return_value=True),
+        patch("routers.extensions._activate_service") as activate,
+        patch("routers.extensions._call_agent") as call_agent,
+        patch("routers.extensions._call_agent_hook") as call_hook,
+    ):
+        from routers.templates import apply_template
+        result = await apply_template("onboarding-full-stack", api_key="test")
+
+    assert result["qr1_registration_only"] is True
+    assert result["enabled_count"] == 0
+    assert result["started_count"] == 0
+    assert result["failed_services"] == []
+    assert result["skipped_services"] == []
+    assert result["results"] == {
+        "langfuse": "qr1_registration_only",
+        "n8n": "qr1_registration_only",
+        "hermes": "qr1_registration_only",
+    }
+    activate.assert_not_called()
+    call_agent.assert_not_called()
+    call_hook.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_template_apply_activates_deps(tmp_path):
     """Apply activates transitive deps before the target service."""
     mock_templates = [{

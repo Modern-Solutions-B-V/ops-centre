@@ -8,6 +8,173 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-17 — Add QR1 operator readiness and onboarding integration
+
+### Change ID
+`MSODS-0016`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`feature/qr1-operator-readiness` / PR pending
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`CONFIGURE / EXTEND`
+
+### Files changed
+- `ods/docker-compose.ms-qr1.yml`
+- `ods/profiles/ms-qr1.env.example`
+- `ods/.env.schema.json`
+- `ods/config/ms-qr1/operator-access.json`
+- `ods/scripts/ms-qr1-operator-readiness.py`
+- `ods/scripts/ms-qr1-operator-readiness.sh`
+- `ods/tests/test-ms-qr1-operator-readiness.sh`
+- `ods/tests/test-ms-qr1-helpers.sh`
+- `ods/extensions/services/dashboard-api/config.py`
+- `ods/extensions/services/dashboard-api/routers/setup.py`
+- `ods/extensions/services/dashboard-api/routers/templates.py`
+- `ods/extensions/services/dashboard-api/tests/test_setup.py`
+- `ods/extensions/services/dashboard-api/tests/test_templates.py`
+- `ods/extensions/services/dashboard/src/App.jsx`
+- `ods/extensions/services/dashboard/src/hooks/useFirstRun.js`
+- `ods/extensions/services/dashboard/src/pages/FirstBoot.jsx`
+- `ods/extensions/services/dashboard/src/pages/FirstBoot.test.jsx`
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/backlog/QR2-BACKLOG.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+EVO-X3 QR1 infrastructure qualification is complete, but live operator first
+use exposed two integration defects before functional workflow testing could
+start:
+
+1. Open WebUI had `WEBUI_AUTH=true` and signup disabled, but no headless
+   first-admin bootstrap path, so a fresh QR1 database had zero users and
+   browser signup returned `403`.
+2. Generic ODS first boot applied the Full Stack onboarding template after QR1
+   had already been selected, hardened and qualified, mutating the Langfuse
+   compose file state from `compose.yaml.disabled` to `compose.yaml` and
+   breaking deterministic QR1 compose rendering.
+
+### Design
+QR1 first boot is now registration/operator setup only. QR1 is detected through
+the existing `MS_QR1_HOST_GATEWAY` deployment signal. The dashboard wizard skips
+template application in QR1, and the backend template endpoint returns a
+deterministic QR1 no-op receipt if called directly. Generic/non-QR1 onboarding
+continues to apply selected templates.
+
+Open WebUI QR1 compose now passes the supported headless first-admin variables
+through from the deployment `.env` while keeping auth enabled and signup
+disabled. Operators must set the admin email/password in `.env`; no credential
+value is committed, logged or documented.
+
+A QR1 operator access registry records the approved MacBook launch URLs and
+which scoped services are operator-facing versus internal. The new read-only
+`scripts/ms-qr1-operator-readiness.sh` command emits a concise table or
+`--json` report covering container health, shallow functional probes,
+auth/bootstrap readiness, canonical operator URLs, dependency status and next
+actions.
+
+The readiness verdict is intentionally conservative:
+
+- container health uses exact state/health values and cannot treat
+  `unhealthy`, `starting` or `exited` services as ready;
+- normal functional probes require the capability-specific expected status,
+  usually HTTP `2xx`; arbitrary `4xx` is not globally successful;
+- Hermes keeps only the reviewed unauthenticated denial contract, including
+  `401`/`403`/`404` and exact `303 Location: /auth/required`, with redirects
+  disabled so the original proxy response is evaluated and no auth headers can
+  be forwarded to redirected locations;
+- loopback probes use a no-proxy urllib opener so `HTTP_PROXY` and
+  `HTTPS_PROXY` cannot receive local readiness traffic or auth headers;
+- required probe credentials such as Qdrant, Privacy Shield, Token Spy,
+  LiteLLM, Dashboard API keys and `ODS_SESSION_SECRET` must be configured, but
+  their values are never printed;
+- the Ollama capability verifies native loopback Ollama plus the active QR1
+  gateway bridge listener instead of treating `ms-qr1-ollama-bridge` as
+  automatically ready; native `/api/tags` must return `2xx`;
+- canonical Dashboard/Open WebUI URLs are marked remotely reachable only when
+  `MS_QR1_TAILSCALE_HOSTNAME` constructs a URL and the matching Tailscale Serve
+  mapping is present and targets the expected loopback service;
+- Open WebUI readiness requires a read-only inspection proving at least one
+  persisted `role='admin'` user in `data/open-webui/webui.db`; configured
+  bootstrap env values alone are not treated as completed bootstrap.
+
+QR1 detection remains `MS_QR1_HOST_GATEWAY`. Review re-evaluated the proposed
+dedicated mode marker and left the current signal unchanged because QR1 compose
+rendering requires the gateway, dashboard-api reads the persisted QR1 `.env`,
+and a generic install would only enter the safer registration-only path by
+deliberately setting the MS-specific QR1 gateway signal.
+
+### Security / operational impact
+Positive. The change does not expose new host ports, alter Tailscale Serve,
+change UFW, change the Ollama bridge, or weaken quiescent provisioning. It
+prevents generic onboarding from changing QR1 stack composition after
+qualification and gives operators one non-destructive readiness gate before
+Phase 2 prompt/workflow/agent testing.
+
+Deferred hardening not included in PR #12: WAL-aware Open WebUI readiness is
+tracked as `MSODS-QR2-0004` because the pinned QR1 Open WebUI does not enable
+`DATABASE_ENABLE_SQLITE_WAL` and the current immutable inspection fails closed
+if that assumption changes. DNS trailing-hyphen schema hardening is tracked as
+`MSODS-QR2-0005` because the deployed EVO-X3 Tailscale hostname is valid and
+this edge case is not a QR1 viability blocker.
+
+### Upgrade impact
+On EVO-X3 after merge:
+
+1. Pull reviewed `ms/main`.
+2. If generic onboarding already created
+   `extensions/services/langfuse/compose.yaml`, verify it is untracked, remove
+   only that untracked repository file, restore
+   `extensions/services/langfuse/compose.yaml.disabled` from `origin/ms/main`,
+   verify no mixed active+disabled state exists, and rerun
+   `scripts/ms-qr1-compose-flags.sh` plus `docker compose ... config`.
+3. Add `MS_QR1_TAILSCALE_HOSTNAME` plus the Open WebUI first-admin email and
+   password to `ods/.env` using the existing secret-handling process.
+4. Recreate only `open-webui` so the supported bootstrap variables are read.
+5. Run `scripts/ms-qr1-operator-readiness.sh`.
+6. Rerun the blocking acceptance gate:
+   `sudo EXPECTED_MODEL=qwen3.8:27b ENV_FILE="$PWD/.env" scripts/ms-qr1-acceptance.sh`.
+7. Continue to Phase 2 functional testing only after both gates are green.
+
+If first boot was already completed through generic onboarding, ensure the
+repository checkout is restored to the merged QR1 state before running
+`scripts/ms-qr1-compose-flags.sh`; QR1 remains authoritative and does not
+accept arbitrary active/disabled Langfuse file combinations as a deployment
+state.
+
+### Validation performed
+- `bash ods/tests/test-ms-qr1-helpers.sh`
+- `bash ods/tests/test-ms-qr1-operator-readiness.sh`
+- `(cd ods/extensions/services/dashboard && npm test -- FirstBoot.test.jsx)`
+- `(cd ods/extensions/services/dashboard-api && env PYTEST_ADDOPTS='-p no:cacheprovider' ../../../../.venv-qr1-validation/bin/pytest tests/test_setup.py tests/test_templates.py)`
+- `for f in ods/scripts/ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-operator-readiness.sh; do bash -n "$f"; done`
+- `PYTHONPYCACHEPREFIX=/tmp/ms-qr1-operator-pycache python3 -m py_compile ods/scripts/ms-qr1-operator-readiness.py ods/extensions/services/dashboard-api/config.py ods/extensions/services/dashboard-api/routers/setup.py ods/extensions/services/dashboard-api/routers/templates.py`
+- `(cd ods && PYTHONPYCACHEPREFIX=/tmp/ms-qr1-make-pycache make lint)`
+- `RUFF_CACHE_DIR=/tmp/ms-qr1-operator-ruff-cache .venv-qr1-validation/bin/ruff check ods/ --select E,F,W --ignore E501,E701,E731,E741,E402`
+- `python3 ods/scripts/ms-qr1-ollama-http-proxy.py --self-test`
+- `(cd ods && MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config >/tmp/qr1-operator-compose.rendered.yml)`
+- `python3 ods/tests/contracts/test-network-exposure-contracts.py`
+- `git diff --check`
+- `if rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" docs/ms/ODS-MS-CHANGELOG.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md docs/ms/backlog/QR2-BACKLOG.md ods/docker-compose.ms-qr1.yml ods/profiles/ms-qr1.env.example ods/.env.schema.json ods/config/ms-qr1/operator-access.json ods/scripts/ms-qr1-operator-readiness.py ods/scripts/ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-operator-readiness.sh ods/tests/test-ms-qr1-helpers.sh ods/extensions/services/dashboard-api/config.py ods/extensions/services/dashboard-api/routers/setup.py ods/extensions/services/dashboard-api/routers/templates.py ods/extensions/services/dashboard-api/tests/test_setup.py ods/extensions/services/dashboard-api/tests/test_templates.py ods/extensions/services/dashboard/src/App.jsx ods/extensions/services/dashboard/src/hooks/useFirstRun.js ods/extensions/services/dashboard/src/pages/FirstBoot.jsx ods/extensions/services/dashboard/src/pages/FirstBoot.test.jsx | grep -v GENERATE_ME | grep -v "_PORT=" | grep -v "OPEN_WEBUI_ADMIN_PASSWORD" | grep -v "LANGFUSE_INIT_USER_PASSWORD" | grep -v "MS_QR1_READINESS_STATUS_" | grep -v "printf '%s%s%s" | grep -v 'QDRANT_" "API_KEY' | grep -v 'ODS_SESSION_" "SECRET'; then exit 1; fi`
+
+### Rollback
+Repository rollback: revert this commit. Host rollback: remove the QR1 Open
+WebUI first-admin values from `.env` only to stop future env-driven bootstrap
+attempts. That does not remove an admin already persisted in
+`data/open-webui/webui.db`; normal rollback preserves persistent users.
+Destructive user/database rollback requires a separate reviewed quiescent
+restore/removal procedure. Do not enable signup, expose public Open WebUI
+signup, or casually delete the database during rollback.
+
+---
+
 ## 2026-08-17 — Close EVO-X3 QR1 hardware qualification
 
 ### Change ID

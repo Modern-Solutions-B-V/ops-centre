@@ -1,0 +1,69 @@
+{
+  "schema_version": "ms.qr1.operator_access.v1",
+  "operator_host_env": "MS_QR1_TAILSCALE_HOSTNAME",
+  "operator_surfaces": [
+    {
+      "id": "dashboard",
+      "capability": "ODS Dashboard / Control Centre",
+      "services": ["dashboard", "dashboard-api"],
+      "canonical_url": "https://${MS_QR1_TAILSCALE_HOSTNAME}",
+      "local_url": "http://127.0.0.1:${DASHBOARD_PORT:-3001}/",
+      "remote_access": "Tailscale Serve HTTPS 443 to loopback dashboard",
+      "auth_contract": "dashboard API key at reverse proxy plus ods-session for protected flows"
+    },
+    {
+      "id": "open-webui",
+      "capability": "Open WebUI",
+      "services": ["open-webui", "litellm"],
+      "canonical_url": "https://${MS_QR1_TAILSCALE_HOSTNAME}:8443",
+      "local_url": "http://127.0.0.1:${WEBUI_PORT:-3000}/",
+      "remote_access": "Tailscale Serve HTTPS 8443 to loopback Open WebUI",
+      "auth_contract": "WEBUI_AUTH true, signup disabled, headless first-admin env"
+    },
+    {
+      "id": "n8n",
+      "capability": "n8n Workflows",
+      "services": ["n8n"],
+      "canonical_url": "",
+      "local_url": "http://127.0.0.1:${N8N_PORT:-5678}/",
+      "remote_access": "No QR1 operator route approved by default",
+      "auth_contract": "n8n basic auth credentials from .env"
+    },
+    {
+      "id": "langfuse",
+      "capability": "Langfuse Observability",
+      "services": ["langfuse", "langfuse-worker", "langfuse-postgres", "langfuse-clickhouse", "langfuse-redis", "langfuse-minio"],
+      "canonical_url": "",
+      "local_url": "http://127.0.0.1:${LANGFUSE_PORT:-3006}/",
+      "remote_access": "No QR1 operator route approved by default",
+      "auth_contract": "Langfuse init credentials from .env"
+    },
+    {
+      "id": "perplexica",
+      "capability": "Perplexica Research",
+      "services": ["perplexica", "searxng", "litellm"],
+      "canonical_url": "",
+      "local_url": "http://127.0.0.1:${PERPLEXICA_PORT:-3004}/",
+      "remote_access": "No QR1 operator route approved by default",
+      "auth_contract": "local loopback UI; no additional QR1 route"
+    },
+    {
+      "id": "comfyui",
+      "capability": "ComfyUI Image Generation",
+      "services": ["comfyui"],
+      "canonical_url": "",
+      "local_url": "http://127.0.0.1:${COMFYUI_PORT:-8188}/",
+      "remote_access": "No QR1 operator route approved by default",
+      "auth_contract": "internal/loopback UI only"
+    },
+    {
+      "id": "hermes",
+      "capability": "Hermes Operator Surface",
+      "services": ["hermes", "hermes-proxy", "dashboard-api"],
+      "canonical_url": "",
+      "local_url": "http://127.0.0.1:${HERMES_PROXY_PORT:-9120}/",
+      "remote_access": "No QR1 Hermes remote route approved by default; no host 9119 listener",
+      "auth_contract": "Caddy forward_auth via dashboard-api ods-session"
+    }
+  ]
+}

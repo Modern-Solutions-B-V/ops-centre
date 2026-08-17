@@ -5,7 +5,10 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from config import EXTENSION_CATALOG, GPU_BACKEND, SERVICES, TEMPLATES, USER_EXTENSIONS_DIR
+from config import (
+    EXTENSION_CATALOG, GPU_BACKEND, SERVICES, TEMPLATES, USER_EXTENSIONS_DIR,
+    is_ms_qr1_deployment,
+)
 from security import verify_api_key
 
 logger = logging.getLogger(__name__)
@@ -160,6 +163,29 @@ async def apply_template(template_id: str, api_key: str = Depends(verify_api_key
     template = next((t for t in TEMPLATES if t["id"] == template_id), None)
     if not template:
         raise HTTPException(status_code=404, detail=f"Template not found: {template_id}")
+
+    if is_ms_qr1_deployment():
+        logger.info(
+            "Skipping template apply for %s because MS QR1 composition is fixed",
+            template_id,
+        )
+        return {
+            "template_id": template_id,
+            "results": {
+                service_id: "qr1_registration_only"
+                for service_id in template.get("services", [])
+            },
+            "enabled_count": 0,
+            "started_count": 0,
+            "library_installed": [],
+            "failed_services": [],
+            "skipped_services": [],
+            "warnings": [
+                "MS QR1 first boot is registration-only; stack templates are not applied.",
+            ],
+            "restart_required": False,
+            "qr1_registration_only": True,
+        }
 
     from helpers import get_cached_services, get_all_services
     from routers.extensions import (

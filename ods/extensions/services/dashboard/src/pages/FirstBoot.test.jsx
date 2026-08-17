@@ -177,6 +177,38 @@ describe('FirstBoot', () => {
     )
   })
 
+  test('skips stack template application for QR1 registration-only first boot', async () => {
+    const fetchMock = vi.fn(async (url, options = {}) => {
+      if (url === '/api/auth/magic-link/owner-card/status') {
+        return response(ownerCardReady)
+      }
+      if (url === '/api/auth/magic-link/generate' && options.method === 'POST') {
+        return response({
+          url: 'http://auth.spark.local/magic-link/qr1-token',
+          target_username: 'sam',
+        })
+      }
+      if (url === '/api/setup/complete' && options.method === 'POST') {
+        return response({ success: true })
+      }
+      if (String(url).startsWith('/api/auth/magic-link/qr?url=')) {
+        return response({ data_url: 'data:image/png;base64,qrpayload' })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<FirstBoot
+      onComplete={vi.fn()}
+      setupStatus={{ deployment_mode: 'ms-qr1', template_application_enabled: false }}
+    />)
+    await finishWizard('Full ODS Stack')
+
+    expect(await screen.findByRole('heading', { name: /you're set/i })).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/templates/onboarding-full-stack/apply', expect.anything())
+    expect(fetchMock).toHaveBeenCalledWith('/api/setup/complete', { method: 'POST' })
+  })
+
   test('keeps first-run active when a selected stack is only partially applied', async () => {
     const fetchMock = vi.fn(async (url, options = {}) => {
       if (url === '/api/auth/magic-link/owner-card/status') {
