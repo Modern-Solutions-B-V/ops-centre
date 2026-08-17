@@ -65,14 +65,15 @@ arbitrary LAN or non-gateway listeners. It now exempts an extra `:11434`
 listener only when its exact address is assigned to `tailscale0` and
 `tailscale serve status` shows that same logical TCP `11434` Serve mapping
 forwards to `tcp://127.0.0.1:11434`. Malformed, duplicate or ambiguous Serve
-output is fail-closed. If Tailscale Serve is absent or cannot prove the mapping,
-no extra listener is exempted.
+output is fail-closed; valid unrelated HTTP/HTTPS Serve mappings are ignored
+without authorizing Ollama. If Tailscale Serve is absent or cannot prove the
+mapping, no extra listener is exempted.
 
 The Hermes check still requires host port `9119` to be unbound and still fails
 unauthenticated `200`. It now accepts `303` only with exact
 `Location: /auth/required`, matching the reviewed Caddy auth contract, and does
 not follow redirects. A `303` must contain exactly one `Location` header; zero,
-duplicate or absolute/query redirects fail.
+duplicate, mixed-case duplicate or absolute/query redirects fail.
 
 ### Security / privacy impact
 Neutral to positive. This is an acceptance-contract correction only. It does

@@ -313,8 +313,12 @@ set -euo pipefail
 emit_response() {
   case "${CURL_MODE:-401}" in
     303-auth) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-auth-lower) printf 'HTTP/1.1 303 See Other\r\nlocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-auth-mixed) printf 'HTTP/1.1 303 See Other\r\nLoCaTiOn: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-duplicate-identical) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-duplicate-identical-case) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nlocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-duplicate-conflicting) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
+    303-duplicate-conflicting-case) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nlocation: /evil\r\n\r\nHTTP_STATUS:303' ;;
     303-other) printf 'HTTP/1.1 303 See Other\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
     303-missing) printf 'HTTP/1.1 303 See Other\r\n\r\nHTTP_STATUS:303' ;;
     303-query) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required?x=1\r\n\r\nHTTP_STATUS:303' ;;
@@ -1153,6 +1157,20 @@ tcp://[fd7a:115c:a1e0::a801:5c2]:11434
 --> tcp://127.0.0.1:11434
 EOF
 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
+cat > "$tmpdir/ss-state.txt" <<'EOF'
+State  Recv-Q Send-Q Local Address:Port                   Peer Address:Port Process
+LISTEN 0      4096   127.0.0.1:11434                      0.0.0.0:*         users:(("ollama",pid=10,fd=3))
+LISTEN 0      4096   172.31.0.1:11434                     0.0.0.0:*         users:(("python3",pid=11,fd=3))
+LISTEN 0      4096   172.20.0.1:11434                     0.0.0.0:*         users:(("python3",pid=12,fd=3))
+LISTEN 0      4096   100.116.5.69:11434                   0.0.0.0:*         users:(("tailscaled",pid=15,fd=3))
+EOF
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+https://evox3.tailfc79e6.ts.net:443
+--> http://127.0.0.1:3001
+tcp://100.116.5.69:11434
+--> tcp://127.0.0.1:11434
+EOF
+"${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard'
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
 tcp://evox3.tailfc79e6.ts.net:443 (tailnet only)
 --> tcp://127.0.0.1:3001
@@ -1162,6 +1180,15 @@ if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_l
   exit 1
 fi
 assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-no-serve.out"
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+https://evox3.tailfc79e6.ts.net:443
+--> http://127.0.0.1:3001
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-tail-https-only.out" 2> "$tmpdir/ss-tail-https-only.err"; then
+  echo "listener acceptance should not exempt Ollama listeners for HTTPS-only Tailscale Serve output" >&2
+  exit 1
+fi
+assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-https-only.out"
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
 tcp://100.116.5.69:11434
 --> tcp://127.0.0.1:3001
@@ -1212,6 +1239,17 @@ if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_l
 fi
 assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-malformed.out"
 cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
+ftp://100.116.5.69:11434
+--> tcp://127.0.0.1:11434
+tcp://100.116.5.69:11434
+--> tcp://127.0.0.1:11434
+EOF
+if "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_live_listeners_loopback_and_bridge_no_wildcard' > "$tmpdir/ss-tail-malformed-mixed.out" 2> "$tmpdir/ss-tail-malformed-mixed.err"; then
+  echo "listener acceptance should fail closed on malformed Serve blocks even when a valid TCP mapping is also present" >&2
+  exit 1
+fi
+assert_contains 'non-gateway QR1 Ollama bridge bind' "$tmpdir/ss-tail-malformed-mixed.out"
+cat > "$tmpdir/tailscale-serve-status.txt" <<'EOF'
 tcp://evox3.tailfc79e6.ts.net:11434 (tailnet only)
 tcp://100.116.5.69:11434
 tcp://[fd7a:115c:a1e0::a801:5c2]:11434
@@ -1248,8 +1286,12 @@ set -euo pipefail
 if [[ "$*" == *" -D - "* || "$*" == *"-D -"* ]]; then
   case "${CURL_MODE:-401}" in
     303-auth) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-auth-lower) printf 'HTTP/1.1 303 See Other\r\nlocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-auth-mixed) printf 'HTTP/1.1 303 See Other\r\nLoCaTiOn: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-duplicate-identical) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
+    303-duplicate-identical-case) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nlocation: /auth/required\r\n\r\nHTTP_STATUS:303' ;;
     303-duplicate-conflicting) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
+    303-duplicate-conflicting-case) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required\r\nlocation: /evil\r\n\r\nHTTP_STATUS:303' ;;
     303-other) printf 'HTTP/1.1 303 See Other\r\nLocation: /anything-else\r\n\r\nHTTP_STATUS:303' ;;
     303-missing) printf 'HTTP/1.1 303 See Other\r\n\r\nHTTP_STATUS:303' ;;
     303-query) printf 'HTTP/1.1 303 See Other\r\nLocation: /auth/required?x=1\r\n\r\nHTTP_STATUS:303' ;;
@@ -1277,6 +1319,8 @@ State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process
 LISTEN 0      4096   127.0.0.1:9120      0.0.0.0:*         users:(("docker-proxy",pid=18,fd=3))
 EOF
 CURL_MODE=303-auth "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
+CURL_MODE=303-auth-lower "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
+CURL_MODE=303-auth-mixed "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
 CURL_MODE=401 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
 CURL_MODE=403 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
 CURL_MODE=404 "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui'
@@ -1290,11 +1334,21 @@ if CURL_MODE=303-duplicate-identical "${env_prefix[@]}" bash -c 'source scripts/
   exit 1
 fi
 assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-duplicate-identical.err"
+if CURL_MODE=303-duplicate-identical-case "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-duplicate-identical-case.out" 2> "$tmpdir/hermes-redirect-duplicate-identical-case.err"; then
+  echo "Hermes TUI acceptance should fail on duplicate same-value Location headers with different casing" >&2
+  exit 1
+fi
+assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-duplicate-identical-case.err"
 if CURL_MODE=303-duplicate-conflicting "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-duplicate-conflicting.out" 2> "$tmpdir/hermes-redirect-duplicate-conflicting.err"; then
   echo "Hermes TUI acceptance should fail on duplicate conflicting Location headers" >&2
   exit 1
 fi
 assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-duplicate-conflicting.err"
+if CURL_MODE=303-duplicate-conflicting-case "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-duplicate-conflicting-case.out" 2> "$tmpdir/hermes-redirect-duplicate-conflicting-case.err"; then
+  echo "Hermes TUI acceptance should fail on conflicting Location headers with different casing" >&2
+  exit 1
+fi
+assert_contains 'unexpected HTTP redirect' "$tmpdir/hermes-redirect-duplicate-conflicting-case.err"
 if CURL_MODE=303-missing "${env_prefix[@]}" bash -c 'source scripts/ms-qr1-acceptance.sh; check_hermes_tui' > "$tmpdir/hermes-redirect-missing.out" 2> "$tmpdir/hermes-redirect-missing.err"; then
   echo "Hermes TUI acceptance should fail when 303 has no Location header" >&2
   exit 1

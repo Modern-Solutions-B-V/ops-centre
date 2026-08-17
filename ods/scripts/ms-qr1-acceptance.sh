@@ -73,8 +73,8 @@ expect_http_status_or_auth_redirect() {
       return 0
       ;;
     303)
-      location_count="$(printf '%s\n' "$response" | awk 'BEGIN{IGNORECASE=1; count=0} /^Location:/ {count++} END {print count}')"
-      location="$(printf '%s\n' "$response" | awk 'BEGIN{IGNORECASE=1} /^Location:/ {sub(/^[^:]*:[[:space:]]*/, ""); gsub(/\r/, ""); print; exit}')"
+      location_count="$(printf '%s\n' "$response" | awk 'BEGIN{count=0} {colon=index($0, ":"); if (colon > 0 && tolower(substr($0, 1, colon - 1)) == "location") count++} END {print count}')"
+      location="$(printf '%s\n' "$response" | awk '{colon=index($0, ":"); if (colon > 0 && tolower(substr($0, 1, colon - 1)) == "location") {value=substr($0, colon + 1); sub(/^[[:space:]]*/, "", value); gsub(/\r/, "", value); print value; exit}}')"
       if [[ "$location_count" == "1" && "$location" == "/auth/required" ]]; then
         return 0
       fi
@@ -269,8 +269,8 @@ for line in os.environ["TAILSCALE_ADDRS"].splitlines():
             assigned.add(str(ipaddress.ip_interface(parts[idx + 1]).ip))
 
 lines = os.environ["TAILSCALE_SERVE_STATUS"].splitlines()
-source_re = re.compile(r"^tcp://(?:\[([^\]]+)\]|([^:\s]+)):(\d+)(?:\s+\(tailnet only\))?$")
-target_re = re.compile(r"^-->\s*(tcp://[^\s]+)$")
+source_re = re.compile(r"^(tcp|https?)://(?:\[([^\]]+)\]|([^:\s]+)):(\d+)(?:\s+\(tailnet only\))?$")
+target_re = re.compile(r"^-->\s*((?:tcp|https?)://[^\s]+)$")
 approved = set()
 mappings = {}
 pending = []
@@ -284,8 +284,8 @@ for raw_line in lines:
         if not pending:
             raise SystemExit(1)
         target = target_match.group(1)
-        for addr, port in pending:
-            key = (addr, port)
+        for scheme, addr, port in pending:
+            key = (scheme, addr, port)
             if key in mappings:
                 raise SystemExit(1)
             mappings[key] = target
@@ -295,15 +295,16 @@ for raw_line in lines:
     match = source_re.match(line)
     if not match:
         raise SystemExit(1)
-    addr = match.group(1) or match.group(2)
-    port = match.group(3)
-    pending.append((addr, port))
+    scheme = match.group(1)
+    addr = match.group(2) or match.group(3)
+    port = match.group(4)
+    pending.append((scheme, addr, port))
 
 if pending:
     raise SystemExit(1)
 
-for (addr, port), target in mappings.items():
-    if port == "11434" and addr in assigned and target == "tcp://127.0.0.1:11434":
+for (scheme, addr, port), target in mappings.items():
+    if scheme == "tcp" and port == "11434" and addr in assigned and target == "tcp://127.0.0.1:11434":
         approved.add(addr)
 
 for addr in sorted(approved):
