@@ -41,6 +41,7 @@ Classification: CONFIGURE with EXTEND helper scripts. No CORE CHANGE.
 - Host-agent nmcli routes have no supported disable switch in upstream config; QR1 documents and tests unauthenticated denial instead of editing core host-agent code.
 - LiteLLM scoped virtual consumer keys are deferred to QR2. QR1 shares the LiteLLM master key with Open WebUI and Hermes because there is no clean CONFIGURE-only virtual-key provisioning path in this ODS profile without adding deployment complexity or touching core code.
 - Clean Ubuntu 24.04 deploy hosts must have `python3-yaml`, `jq`, and `curl` before QR1 validation; `jq` is required by `scripts/validate-env.sh` and `curl` is required for the post-start Hermes health gate.
+- EVO-X3 hardware qualification of merged `ms/main` at `c8cc43fb` reached the Ollama bridge replacement step and stopped because Ubuntu 24.04 `systemd-analyze verify` rejected `WorkingDirectory="/home/modi/ms-ops/ops-centre/ods"` as a non-absolute path. The one-line unit correction is to render `WorkingDirectory=/home/modi/ms-ops/ops-centre/ods` while preserving `ExecStart="/usr/local/libexec/ms-qr1/ms-qr1-ollama-bridge.sh" serve`. EVO-X3 remains on the legacy socat bridge until this fix is reviewed and merged.
 
 ## Validation To Repeat On Deploy Host
 

@@ -8,6 +8,87 @@ change must be recorded here in the same commit/PR that makes the change.
 
 ---
 
+## 2026-08-17 — Fix QR1 Ollama bridge systemd WorkingDirectory rendering
+
+### Change ID
+`MSODS-0012`
+
+### Agent / Author
+Codex
+
+### Branch / PR
+`fix/qr1-systemd-workingdirectory` / PR pending
+
+### ODS baseline
+`v2.6.0`
+
+### Classification
+`EXTEND`
+
+### Files changed
+- `ods/scripts/ms-qr1-ollama-bridge.sh`
+- `ods/tests/test-ms-qr1-helpers.sh`
+- `docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md`
+- `docs/ms/handovers/2026-08-16-qr1-stack-implementation.md`
+- `docs/ms/ODS-MS-CHANGELOG.md`
+
+### Reason
+Live EVO-X3 Ubuntu 24.04 qualification of merged `ms/main` commit `c8cc43fb`
+reached the QR1 Ollama bridge replacement step and stopped because the rendered
+systemd unit was invalid on the target host:
+
+```ini
+WorkingDirectory="/home/modi/ms-ops/ops-centre/ods"
+ExecStart="/usr/local/libexec/ms-qr1/ms-qr1-ollama-bridge.sh" serve
+```
+
+`systemd-analyze verify` reported `WorkingDirectory= path is not absolute`
+because Ubuntu systemd treated the literal quotes as part of the path. A
+temporary copy changed only `WorkingDirectory=` to the unquoted absolute path,
+and `sudo systemd-analyze verify /tmp/ms-qr1-ollama-bridge.fixed.service`
+returned `VERIFY_RC=0`. `ExecStart="..." serve` was accepted and is preserved.
+
+### Behavior before
+`scripts/ms-qr1-ollama-bridge.sh render-unit` applied the systemd ExecStart
+quoting helper to `WorkingDirectory=`, producing literal wrapping quotes around
+the checkout path.
+
+### Behavior after
+`render-unit` renders `WorkingDirectory=` as the plain absolute checkout path
+accepted by Ubuntu 24.04 systemd, while keeping the existing quoted
+`ExecStart="/usr/local/libexec/ms-qr1/ms-qr1-ollama-bridge.sh" serve`.
+
+### Security / privacy impact
+Neutral. The fix changes only systemd unit rendering for `WorkingDirectory=`.
+It does not change root-owned immutable files under `/usr/local/libexec/ms-qr1`,
+HTTP proxy behavior, gateway discovery, listener scope, systemd hardening,
+UFW behavior, Ollama loopback binding, or Tailscale Serve behavior.
+
+### Qualification status
+Local/static validation passed for this corrective branch. EVO-X3 hardware
+qualification remains **PENDING** and stopped before replacing the running
+legacy socat bridge.
+
+### Validation performed
+- `bash ods/tests/test-ms-qr1-helpers.sh`
+- Linux-only helper regression:
+  `systemd-analyze verify "$tmpdir/ms-qr1-ollama-bridge.rendered.service"`
+  when `systemd-analyze` is available
+- `for f in ods/scripts/ms-qr1-ollama-bridge.sh ods/tests/test-ms-qr1-helpers.sh; do bash -n "$f"; done`
+- `(cd ods && PYTHONPYCACHEPREFIX=/tmp/ms-qr1-make-pycache make lint)`
+- `python3 ods/scripts/ms-qr1-ollama-http-proxy.py --self-test`
+- `(cd ods && MS_QR1_HOST_GATEWAY=127.0.0.1 docker compose --env-file profiles/ms-qr1.env.example $(scripts/ms-qr1-compose-flags.sh) config)`
+- `git diff --check`
+- `rg -n "(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|PRIVATE)|[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|API_KEY)[A-Za-z0-9_]*=[^<[:space:]]+)" docs/ms/ODS-MS-CHANGELOG.md docs/ms/deploy/QR1-DEPLOY-RUNBOOK.md docs/ms/handovers/2026-08-16-qr1-stack-implementation.md ods/scripts/ms-qr1-ollama-bridge.sh ods/tests/test-ms-qr1-helpers.sh`
+
+### Rollback
+Repository rollback: revert the MSODS-0012 commit. Host rollback is not
+required unless the bridge was installed from this branch; if installed, run
+`sudo scripts/ms-qr1-ollama-bridge.sh remove` to remove the service and
+installed bridge files.
+
+---
+
 ## 2026-08-17 — Fix live QR1 clean-host deployment defects
 
 ### Change ID

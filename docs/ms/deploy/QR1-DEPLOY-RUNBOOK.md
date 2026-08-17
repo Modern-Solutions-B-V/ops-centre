@@ -375,7 +375,7 @@ Plan first:
 scripts/ms-qr1-ollama-bridge.sh plan
 scripts/ms-qr1-ollama-bridge.sh expected-listeners
 scripts/ms-qr1-ollama-bridge.sh render-unit | tee /tmp/ms-qr1-ollama-bridge.service
-grep 'WorkingDirectory=".*/ods"' /tmp/ms-qr1-ollama-bridge.service
+grep '^WorkingDirectory=.*/ods$' /tmp/ms-qr1-ollama-bridge.service
 grep 'ExecStart="/usr/local/libexec/ms-qr1/ms-qr1-ollama-bridge.sh" serve' /tmp/ms-qr1-ollama-bridge.service
 grep 'NoNewPrivileges=true' /tmp/ms-qr1-ollama-bridge.service
 grep 'PrivateTmp=true' /tmp/ms-qr1-ollama-bridge.service
