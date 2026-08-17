@@ -97,10 +97,10 @@ The readiness verdict is intentionally conservative:
   their values are never printed;
 - the Ollama capability verifies native loopback Ollama plus the active QR1
   gateway bridge listener instead of treating `ms-qr1-ollama-bridge` as
-  automatically ready;
+  automatically ready; native `/api/tags` must return `2xx`;
 - canonical Dashboard/Open WebUI URLs are marked remotely reachable only when
-  the matching Tailscale Serve mapping is present and targets the expected
-  loopback service;
+  `MS_QR1_TAILSCALE_HOSTNAME` constructs a URL and the matching Tailscale Serve
+  mapping is present and targets the expected loopback service;
 - Open WebUI readiness requires a read-only inspection proving at least one
   persisted `role='admin'` user in `data/open-webui/webui.db`; configured
   bootstrap env values alone are not treated as completed bootstrap.

@@ -361,16 +361,34 @@ def command_or_fixture(name: str, cmd: list[str]) -> tuple[bool, str]:
     return result.returncode == 0, result.stdout
 
 
+def ollama_native_probe(url: str) -> ProbeResult:
+    failure = os.environ.get("MS_QR1_READINESS_OLLAMA_NATIVE_FAILURE")
+    if failure:
+        return ProbeResult(False, f"probe failed: {failure}")
+    fixture_status = os.environ.get("MS_QR1_READINESS_OLLAMA_NATIVE_STATUS")
+    if fixture_status:
+        code = int(fixture_status)
+        return ProbeResult(code in SAFE_HTTP_2XX, f"HTTP {code}", code)
+
+    native = http_probe_basic(url)
+    if not native.ok:
+        return native
+    code = native.status or 0
+    if code not in SAFE_HTTP_2XX:
+        return ProbeResult(False, f"HTTP {code}", code, native.headers)
+    return native
+
+
 def ollama_bridge_probe(url: str) -> ProbeResult:
+    native = ollama_native_probe(url)
+    if not native.ok:
+        return native
+
     fixture = os.environ.get("MS_QR1_READINESS_OLLAMA_BRIDGE_STATE")
     if fixture:
         if fixture == "ready":
             return ProbeResult(True, "native Ollama and QR1 bridge listener present")
         return ProbeResult(False, f"QR1 Ollama bridge not ready: {fixture}")
-
-    native = http_probe_basic(url)
-    if not native.ok:
-        return native
 
     active = run(["systemctl", "is-active", "ms-qr1-ollama-bridge.service"])
     if active.returncode != 0 or active.stdout.strip() != "active":
@@ -572,6 +590,8 @@ def approved_serve_mappings() -> dict[tuple[str, str, str], str]:
 
 def operator_route_state(capability: Capability, canonical_url: str, local_url: str, env: dict[str, str]) -> tuple[str, bool, str]:
     if not canonical_url:
+        if capability.capability in {"ODS Dashboard / Control Centre", "Open WebUI"}:
+            return "no", False, "required QR1 remote operator route is not configured"
         if capability.role == "operator-facing":
             return "loopback-only", True, "no QR1 remote route approved"
         return "internal-only", True, "internal capability"

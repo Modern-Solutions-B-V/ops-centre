@@ -164,10 +164,12 @@ set -a
 source "$status_file"
 set +a
 export MS_QR1_READINESS_TAILSCALE_SERVE_STATUS="$serve_ok"
+export MS_QR1_READINESS_OLLAMA_NATIVE_STATUS=200
 export MS_QR1_READINESS_OLLAMA_BRIDGE_STATE=ready
 run_json "$ps_ok" "$env_ok" "$data_ok" > "$tmpdir/pass.json"
 assert_cap "$tmpdir/pass.json" "Open WebUI" PASS
 assert_cap "$tmpdir/pass.json" "n8n Workflows" PASS
+assert_cap "$tmpdir/pass.json" "Ollama Host Route" PASS
 "$PYTHON_BIN" - "$tmpdir/pass.json" <<'PY'
 import json
 import sys
@@ -179,6 +181,14 @@ assert rows["Hermes Operator Surface"]["canonical_operator_url"] == ""
 assert rows["Hermes Operator Surface"]["operator_reachable"] == "loopback-only"
 assert "fixture-only" not in json.dumps(data)
 PY
+
+if run_json "$ps_ok" "$env_ok" "$data_ok" MS_QR1_TAILSCALE_HOSTNAME= > "$tmpdir/empty-hostname.json"; then
+  echo "missing QR1 Tailscale hostname should fail remote operator readiness" >&2
+  exit 1
+fi
+assert_cap "$tmpdir/empty-hostname.json" "ODS Dashboard / Control Centre" FAIL "required QR1 remote operator route"
+assert_cap "$tmpdir/empty-hostname.json" "Open WebUI" FAIL "required QR1 remote operator route"
+assert_cap "$tmpdir/empty-hostname.json" "Hermes Operator Surface" PASS
 
 serve_wrong="$tmpdir/tailscale-serve-wrong.txt"
 cat > "$serve_wrong" <<'SERVE'
@@ -206,6 +216,24 @@ if run_json "$ps_ok" "$env_ok" "$data_ok" MS_QR1_READINESS_OLLAMA_BRIDGE_STATE=n
   exit 1
 fi
 assert_cap "$tmpdir/ollama-bridge-stopped.json" "Ollama Host Route" FAIL "native-only"
+
+if run_json "$ps_ok" "$env_ok" "$data_ok" MS_QR1_READINESS_OLLAMA_NATIVE_STATUS=500 > "$tmpdir/ollama-native-500.json"; then
+  echo "native Ollama HTTP 500 should fail readiness" >&2
+  exit 1
+fi
+assert_cap "$tmpdir/ollama-native-500.json" "Ollama Host Route" FAIL "HTTP 500"
+
+if run_json "$ps_ok" "$env_ok" "$data_ok" MS_QR1_READINESS_OLLAMA_NATIVE_STATUS=404 > "$tmpdir/ollama-native-404.json"; then
+  echo "native Ollama HTTP 404 should fail readiness" >&2
+  exit 1
+fi
+assert_cap "$tmpdir/ollama-native-404.json" "Ollama Host Route" FAIL "HTTP 404"
+
+if run_json "$ps_ok" "$env_ok" "$data_ok" MS_QR1_READINESS_OLLAMA_NATIVE_FAILURE=connection-refused > "$tmpdir/ollama-native-failure.json"; then
+  echo "native Ollama connection failure should fail readiness" >&2
+  exit 1
+fi
+assert_cap "$tmpdir/ollama-native-failure.json" "Ollama Host Route" FAIL "connection-refused"
 
 if ! env MS_QR1_READINESS_COMPOSE_PS="$ps_ok" ENV_FILE="$env_ok" MS_QR1_READINESS_DATA_DIR="$data_ok" "$PYTHON_BIN" scripts/ms-qr1-operator-readiness.py > "$tmpdir/pass.table"; then
   echo "table mode should pass when JSON mode passes" >&2
